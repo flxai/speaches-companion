@@ -103,6 +103,19 @@
             runHook postInstall
           '';
         });
+
+      mkSubcommandApp = subcommand: description: let
+        app = pkgs.writeShellApplication {
+          name = "trec-${subcommand}";
+          text = ''
+            exec ${trec}/bin/trec ${subcommand} "$@"
+          '';
+        };
+      in {
+        type = "app";
+        program = "${app}/bin/trec-${subcommand}";
+        meta.description = description;
+      };
     in {
       packages = {
         default = trec;
@@ -114,6 +127,25 @@
         fmt = fmt;
         clippy = clippy;
         test = tests;
+      };
+
+      apps = {
+        default = {
+          type = "app";
+          program = "${trec}/bin/trec";
+          meta.description = "Run trec";
+        };
+        trec = {
+          type = "app";
+          program = "${trec}/bin/trec";
+          meta.description = "Run trec";
+        };
+        daemon = mkSubcommandApp "daemon" "Run the trec hotkey daemon";
+        "dictate-live" = mkSubcommandApp "dictate-live" "Run realtime dictation";
+        hotkey = mkSubcommandApp "hotkey" "Send a hotkey IPC command";
+        inject = mkSubcommandApp "inject" "Type text into the focused X11 window";
+        smoke = mkSubcommandApp "smoke" "Run a microphone and STT smoke test";
+        transcribe = mkSubcommandApp "transcribe" "Transcribe an audio file";
       };
 
       devShells.default = pkgs.mkShell {
@@ -141,6 +173,7 @@
   in {
     packages = eachSystem (system: (forSystem system).packages);
     checks = eachSystem (system: (forSystem system).checks);
+    apps = eachSystem (system: (forSystem system).apps);
     devShells = eachSystem (system: (forSystem system).devShells);
     formatter = eachSystem (system: (forSystem system).formatter);
   };
