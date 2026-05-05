@@ -1,10 +1,12 @@
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -17,6 +19,20 @@ pub const STT_SAMPLE_RATE: u32 = 16_000;
 pub struct RawPcmRecording {
     child: Child,
     read_task: JoinHandle<Result<Vec<u8>>>,
+}
+
+pub type SharedPcmBuffer = Arc<Mutex<Vec<u8>>>;
+
+pub struct StreamingPcmCapture {
+    child: Child,
+    pcm: SharedPcmBuffer,
+    read_task: JoinHandle<Result<()>>,
+}
+
+impl StreamingPcmCapture {
+    pub fn shared_pcm(&self) -> SharedPcmBuffer {
+        Arc::clone(&self.pcm)
+    }
 }
 
 pub async fn capture_with_pw_record<F, Fut>(duration: Duration, mut on_chunk: F) -> Result<usize>
@@ -111,6 +127,66 @@ pub async fn start_raw_pcm_recording(sample_rate: u32) -> Result<RawPcmRecording
     });
 
     Ok(RawPcmRecording { child, read_task })
+}
+
+pub async fn start_streaming_pcm_capture(sample_rate: u32) -> Result<StreamingPcmCapture> {
+    let mut child = Command::new("pw-record")
+        .args([
+            "--raw",
+            "--rate",
+            &sample_rate.to_string(),
+            "--channels",
+            &CHANNELS.to_string(),
+            "--format",
+            SAMPLE_FORMAT,
+            "-",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("failed to start pw-record")?;
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("pw-record did not expose stdout")?;
+    let pcm = Arc::new(Mutex::new(Vec::new()));
+    let task_pcm = Arc::clone(&pcm);
+    let read_task = tokio::spawn(async move {
+        let mut chunk = vec![0u8; CHUNK_BYTES];
+        loop {
+            let read = stdout
+                .read(&mut chunk)
+                .await
+                .context("failed to read from pw-record")?;
+            if read == 0 {
+                break;
+            }
+            task_pcm.lock().await.extend_from_slice(&chunk[..read]);
+        }
+        Ok(())
+    });
+
+    Ok(StreamingPcmCapture {
+        child,
+        pcm,
+        read_task,
+    })
+}
+
+pub async fn stop_streaming_pcm_capture(mut capture: StreamingPcmCapture) -> Result<Vec<u8>> {
+    let _ = capture.child.start_kill();
+    let _ = capture.child.wait().await;
+    capture
+        .read_task
+        .await
+        .context("pw-record reader task panicked")??;
+
+    let pcm = capture.pcm.lock().await.clone();
+    if pcm.is_empty() {
+        bail!("recording stopped before any audio was captured");
+    }
+    Ok(pcm)
 }
 
 pub async fn stop_raw_pcm_recording(

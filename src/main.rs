@@ -5,14 +5,12 @@ use clap::{Args, Parser, Subcommand};
 use trec::audio::{record_wav_with_pw_record, STT_SAMPLE_RATE};
 use trec::config::{resolve_config, ConfigInput};
 use trec::daemon::run_daemon;
-use trec::dictation::{
-    default_recording_dir, DictationController, PwRecordRecorder, SpeachesTranscriber,
-};
 use trec::inject::{LibXdoTextInjector, TextInjector};
 use trec::ipc::{default_socket_path, send_command, IpcCommand};
-use trec::notification::DesktopErrorNotifier;
+use trec::notification::{DesktopErrorNotifier, DesktopTranscriptNotifier};
 use trec::phase::PhaseResult;
 use trec::realtime::run_dictate_live;
+use trec::streaming::{RollingHttpTranscriber, StreamingDictationController};
 use trec::stt::{transcribe_file, ResponseFormat, TranscribeOptions};
 
 #[derive(Debug, Parser)]
@@ -136,6 +134,12 @@ async fn main() -> ExitCode {
 
 async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     let socket_path = args.socket_path.unwrap_or_else(default_socket_path);
+    if let Some(record_dir) = args.record_dir {
+        eprintln!(
+            "--record-dir is ignored by the streaming daemon: {}",
+            record_dir.display()
+        );
+    }
     let config = resolve_config(ConfigInput {
         cli_base_url: args.base_url,
         cli_model: args.model,
@@ -147,7 +151,7 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
         env_language: std::env::var("TREC_LANGUAGE").ok(),
         ..ConfigInput::default()
     });
-    let transcriber = SpeachesTranscriber::new(
+    let transcriber = RollingHttpTranscriber::new(
         config.base_url,
         TranscribeOptions {
             model: config.model,
@@ -158,11 +162,13 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
             without_timestamps: true,
         },
     );
-    let recorder = PwRecordRecorder::new(args.record_dir.unwrap_or_else(default_recording_dir));
     let injector = LibXdoTextInjector::default();
-    let notifier = DesktopErrorNotifier;
-    let controller =
-        DictationController::new_with_notifier(recorder, transcriber, injector, notifier);
+    let controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        DesktopTranscriptNotifier,
+        DesktopErrorNotifier,
+    );
 
     eprintln!("trec daemon listening on {}", socket_path.display());
     match run_daemon(&socket_path, controller).await {
