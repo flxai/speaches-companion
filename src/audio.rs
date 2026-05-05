@@ -1,0 +1,115 @@
+use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
+use tokio::time::Instant;
+
+pub const SAMPLE_RATE: u32 = 24_000;
+pub const CHANNELS: u16 = 1;
+pub const SAMPLE_FORMAT: &str = "s16";
+pub const CHUNK_BYTES: usize = 4_096;
+pub const STT_SAMPLE_RATE: u32 = 16_000;
+
+pub async fn capture_with_pw_record<F, Fut>(duration: Duration, mut on_chunk: F) -> Result<usize>
+where
+    F: FnMut(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let mut child = Command::new("pw-record")
+        .args([
+            "--raw",
+            "--rate",
+            &SAMPLE_RATE.to_string(),
+            "--channels",
+            &CHANNELS.to_string(),
+            "--format",
+            SAMPLE_FORMAT,
+            "-",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("failed to start pw-record")?;
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("pw-record did not expose stdout")?;
+    let deadline = Instant::now() + duration;
+    let mut total_bytes = 0usize;
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+
+        let remaining = deadline.saturating_duration_since(now);
+        let mut chunk = vec![0u8; CHUNK_BYTES];
+        let read = match tokio::time::timeout(remaining, stdout.read(&mut chunk)).await {
+            Ok(read) => read.context("failed to read from pw-record")?,
+            Err(_) => break,
+        };
+        if read == 0 {
+            break;
+        }
+
+        chunk.truncate(read);
+        total_bytes += read;
+        on_chunk(chunk).await?;
+    }
+
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    Ok(total_bytes)
+}
+
+pub async fn record_wav_with_pw_record(
+    path: &Path,
+    duration: Duration,
+    sample_rate: u32,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let _ = tokio::fs::remove_file(path).await;
+
+    let sample_count = duration
+        .as_secs()
+        .saturating_mul(sample_rate as u64)
+        .saturating_add((duration.subsec_nanos() as u64 * sample_rate as u64) / 1_000_000_000)
+        .max(1);
+
+    let status = Command::new("pw-record")
+        .args([
+            "--rate",
+            &sample_rate.to_string(),
+            "--channels",
+            "1",
+            "--format",
+            "s16",
+            "--sample-count",
+            &sample_count.to_string(),
+        ])
+        .arg(path)
+        .status()
+        .await
+        .context("failed to start pw-record")?;
+
+    if !status.success() {
+        if tokio::fs::metadata(path)
+            .await
+            .map(|metadata| metadata.len() > 44)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        anyhow::bail!("pw-record failed with {status}");
+    }
+    Ok(())
+}
