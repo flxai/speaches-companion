@@ -1,0 +1,147 @@
+{
+  description = "Linux realtime dictation hotkey client";
+
+  inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+
+  outputs = {
+    self,
+    nixpkgs,
+  }: let
+    systems = [
+      "x86_64-linux"
+      "aarch64-linux"
+    ];
+    eachSystem = nixpkgs.lib.genAttrs systems;
+    forSystem = system: let
+      pkgs = nixpkgs.legacyPackages.${system};
+      lib = pkgs.lib;
+
+      commonArgs = {
+        pname = "trec";
+        version = "0.1.0";
+        src = self;
+        cargoLock.lockFile = ./Cargo.lock;
+        buildInputs = [
+          pkgs.xdotool
+        ];
+
+        meta = with lib; {
+          description = "Linux realtime dictation hotkey client";
+          mainProgram = "trec";
+          platforms = platforms.linux;
+        };
+      };
+
+      trec = pkgs.rustPlatform.buildRustPackage (commonArgs
+        // {
+          doCheck = false;
+          nativeBuildInputs = [
+            pkgs.makeWrapper
+          ];
+          postInstall = ''
+            wrapProgram "$out/bin/trec" \
+              --prefix PATH : ${lib.makeBinPath [pkgs.pipewire]}
+          '';
+        });
+
+      fmt =
+        pkgs.runCommand "trec-fmt-check" {
+          nativeBuildInputs = [
+            pkgs.cargo
+            pkgs.rustfmt
+          ];
+          src = self;
+        } ''
+          cp -r "$src" source
+          chmod -R +w source
+          cd source
+          cargo fmt --check
+          touch "$out"
+        '';
+
+      clippy = pkgs.rustPlatform.buildRustPackage (commonArgs
+        // {
+          pname = "trec-clippy";
+          doCheck = true;
+          nativeBuildInputs = [
+            pkgs.clippy
+          ];
+          buildPhase = ''
+            runHook preBuild
+            touch trec-clippy
+            runHook postBuild
+          '';
+          checkPhase = ''
+            runHook preCheck
+            cargo clippy --offline --workspace --all-targets -- -D warnings
+            runHook postCheck
+          '';
+          installPhase = ''
+            runHook preInstall
+            touch "$out"
+            runHook postInstall
+          '';
+        });
+
+      tests = pkgs.rustPlatform.buildRustPackage (commonArgs
+        // {
+          pname = "trec-test";
+          doCheck = true;
+          buildPhase = ''
+            runHook preBuild
+            touch trec-test
+            runHook postBuild
+          '';
+          checkPhase = ''
+            runHook preCheck
+            cargo test --offline --quiet
+            runHook postCheck
+          '';
+          installPhase = ''
+            runHook preInstall
+            touch "$out"
+            runHook postInstall
+          '';
+        });
+    in {
+      packages = {
+        default = trec;
+        trec = trec;
+      };
+
+      checks = {
+        default = trec;
+        fmt = fmt;
+        clippy = clippy;
+        test = tests;
+      };
+
+      devShells.default = pkgs.mkShell {
+        inputsFrom = [
+          trec
+          clippy
+        ];
+        packages = with pkgs; [
+          cargo
+          pipewire
+          pkg-config
+          rust-analyzer
+          rustc
+          rustfmt
+          xdotool
+        ];
+        shellHook = ''
+          export LIBRARY_PATH="${lib.makeLibraryPath [pkgs.xdotool]}''${LIBRARY_PATH:+:''${LIBRARY_PATH}}"
+          export LD_LIBRARY_PATH="${lib.makeLibraryPath [pkgs.xdotool]}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
+        '';
+      };
+
+      formatter = pkgs.alejandra;
+    };
+  in {
+    packages = eachSystem (system: (forSystem system).packages);
+    checks = eachSystem (system: (forSystem system).checks);
+    devShells = eachSystem (system: (forSystem system).devShells);
+    formatter = eachSystem (system: (forSystem system).formatter);
+  };
+}
