@@ -9,6 +9,9 @@ use crate::audio::{
 use crate::daemon::{DaemonResponse, HotkeyHandler};
 use crate::inject::{normalize_transcript_for_injection, TextInjector};
 use crate::ipc::IpcCommand;
+use crate::notification::{
+    dictation_error_body, ErrorNotifier, NoopErrorNotifier, DICTATION_ERROR_SUMMARY,
+};
 use crate::stt::{transcribe_file, TranscribeOptions};
 
 #[async_trait]
@@ -24,15 +27,17 @@ pub trait Transcriber: Send + Sync {
     async fn transcribe(&self, audio_path: &Path) -> anyhow::Result<String>;
 }
 
-pub struct DictationController<R, T, I>
+pub struct DictationController<R, T, I, N = NoopErrorNotifier>
 where
     R: Recorder,
     T: Transcriber,
     I: TextInjector,
+    N: ErrorNotifier,
 {
     recorder: R,
     transcriber: T,
     injector: I,
+    notifier: N,
     recording: Option<R::Recording>,
 }
 
@@ -47,6 +52,25 @@ where
             recorder,
             transcriber,
             injector,
+            notifier: NoopErrorNotifier,
+            recording: None,
+        }
+    }
+}
+
+impl<R, T, I, N> DictationController<R, T, I, N>
+where
+    R: Recorder,
+    T: Transcriber,
+    I: TextInjector,
+    N: ErrorNotifier,
+{
+    pub fn new_with_notifier(recorder: R, transcriber: T, injector: I, notifier: N) -> Self {
+        Self {
+            recorder,
+            transcriber,
+            injector,
+            notifier,
             recording: None,
         }
     }
@@ -57,11 +81,12 @@ where
 }
 
 #[async_trait]
-impl<R, T, I> HotkeyHandler for DictationController<R, T, I>
+impl<R, T, I, N> HotkeyHandler for DictationController<R, T, I, N>
 where
     R: Recorder + Send,
     T: Transcriber + Send,
     I: TextInjector + Send,
+    N: ErrorNotifier + Send,
 {
     async fn handle_hotkey(&mut self, command: IpcCommand) -> anyhow::Result<DaemonResponse> {
         match command {
@@ -71,18 +96,25 @@ where
     }
 }
 
-impl<R, T, I> DictationController<R, T, I>
+impl<R, T, I, N> DictationController<R, T, I, N>
 where
     R: Recorder,
     T: Transcriber,
     I: TextInjector,
+    N: ErrorNotifier,
 {
     async fn start_recording(&mut self) -> anyhow::Result<DaemonResponse> {
         if self.recording.is_some() {
             return Ok(DaemonResponse::AlreadyRecording);
         }
 
-        self.recording = Some(self.recorder.start().await?);
+        self.recording = Some(match self.recorder.start().await {
+            Ok(recording) => recording,
+            Err(error) => {
+                self.notify_failure("Recording start failed", &error);
+                return Err(error);
+            }
+        });
         Ok(DaemonResponse::Started)
     }
 
@@ -91,13 +123,35 @@ where
             return Ok(DaemonResponse::AlreadyIdle);
         };
 
-        let audio_path = self.recorder.stop(recording).await?;
-        let transcript = self.transcriber.transcribe(&audio_path).await?;
+        let audio_path = match self.recorder.stop(recording).await {
+            Ok(path) => path,
+            Err(error) => {
+                self.notify_failure("Recording stop failed", &error);
+                return Err(error);
+            }
+        };
+        let transcript = match self.transcriber.transcribe(&audio_path).await {
+            Ok(transcript) => transcript,
+            Err(error) => {
+                self.notify_failure("Transcription failed", &error);
+                return Err(error);
+            }
+        };
         if let Some(text) = normalize_transcript_for_injection(&transcript) {
-            self.injector.inject_text(&text)?;
+            if let Err(error) = self.injector.inject_text(&text) {
+                self.notify_failure("Text injection failed", &error);
+                return Err(error);
+            }
         }
 
         Ok(DaemonResponse::Stopped)
+    }
+
+    fn notify_failure(&self, stage: &str, error: &anyhow::Error) {
+        let body = dictation_error_body(stage, error);
+        if let Err(notify_error) = self.notifier.notify_error(DICTATION_ERROR_SUMMARY, &body) {
+            eprintln!("trec notification failed: {notify_error:#}");
+        }
     }
 }
 

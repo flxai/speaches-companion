@@ -6,6 +6,7 @@ use trec::daemon::{DaemonResponse, HotkeyHandler};
 use trec::dictation::{DictationController, Recorder, Transcriber};
 use trec::inject::{normalize_transcript_for_injection, TextInjector};
 use trec::ipc::IpcCommand;
+use trec::notification::{ErrorNotifier, DICTATION_ERROR_SUMMARY};
 
 #[tokio::test]
 async fn hotkey_up_records_transcribes_and_injects_text() {
@@ -119,6 +120,41 @@ async fn empty_transcript_does_not_inject_text() {
     assert!(injected.lock().unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn transcription_error_notifies_and_does_not_inject_text() {
+    let recorder = FakeRecorder::new(PathBuf::from("/tmp/trec-test.wav"));
+    let transcriber = FakeTranscriber::failing("connection refused");
+    let injector = FakeInjector::default();
+    let injected = injector.injected.clone();
+    let notifier = FakeNotifier::default();
+    let notifications = notifier.notifications.clone();
+    let mut controller =
+        DictationController::new_with_notifier(recorder, transcriber, injector, notifier);
+
+    assert_eq!(
+        controller
+            .handle_hotkey(IpcCommand::HotkeyDown)
+            .await
+            .unwrap(),
+        DaemonResponse::Started
+    );
+    let error = controller
+        .handle_hotkey(IpcCommand::HotkeyUp)
+        .await
+        .unwrap_err();
+
+    assert!(!controller.is_recording());
+    assert!(error.to_string().contains("connection refused"));
+    assert!(injected.lock().unwrap().is_empty());
+    assert_eq!(
+        *notifications.lock().unwrap(),
+        vec![(
+            DICTATION_ERROR_SUMMARY.to_string(),
+            "Transcription failed: connection refused".to_string()
+        )]
+    );
+}
+
 #[test]
 fn transcript_normalization_trims_outer_whitespace_only() {
     assert_eq!(
@@ -165,14 +201,21 @@ impl Recorder for FakeRecorder {
 
 #[derive(Clone)]
 struct FakeTranscriber {
-    text: String,
+    result: Result<String, String>,
     paths: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl FakeTranscriber {
     fn new(text: &str) -> Self {
         Self {
-            text: text.to_string(),
+            result: Ok(text.to_string()),
+            paths: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn failing(message: &str) -> Self {
+        Self {
+            result: Err(message.to_string()),
             paths: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -182,7 +225,7 @@ impl FakeTranscriber {
 impl Transcriber for FakeTranscriber {
     async fn transcribe(&self, audio_path: &Path) -> anyhow::Result<String> {
         self.paths.lock().unwrap().push(audio_path.to_path_buf());
-        Ok(self.text.clone())
+        self.result.clone().map_err(anyhow::Error::msg)
     }
 }
 
@@ -194,6 +237,21 @@ struct FakeInjector {
 impl TextInjector for FakeInjector {
     fn inject_text(&self, text: &str) -> anyhow::Result<()> {
         self.injected.lock().unwrap().push(text.to_string());
+        Ok(())
+    }
+}
+
+#[derive(Clone, Default)]
+struct FakeNotifier {
+    notifications: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl ErrorNotifier for FakeNotifier {
+    fn notify_error(&self, summary: &str, body: &str) -> anyhow::Result<()> {
+        self.notifications
+            .lock()
+            .unwrap()
+            .push((summary.to_string(), body.to_string()));
         Ok(())
     }
 }

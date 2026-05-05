@@ -5,6 +5,7 @@ pub mod dictation;
 pub mod event;
 pub mod inject;
 pub mod ipc;
+pub mod notification;
 pub mod phase;
 pub mod realtime;
 pub mod stt;

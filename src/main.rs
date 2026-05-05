@@ -10,6 +10,7 @@ use trec::dictation::{
 };
 use trec::inject::{LibXdoTextInjector, TextInjector};
 use trec::ipc::{default_socket_path, send_command, IpcCommand};
+use trec::notification::DesktopErrorNotifier;
 use trec::phase::PhaseResult;
 use trec::realtime::run_dictate_live;
 use trec::stt::{transcribe_file, ResponseFormat, TranscribeOptions};
@@ -159,7 +160,9 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     );
     let recorder = PwRecordRecorder::new(args.record_dir.unwrap_or_else(default_recording_dir));
     let injector = LibXdoTextInjector::default();
-    let controller = DictationController::new(recorder, transcriber, injector);
+    let notifier = DesktopErrorNotifier;
+    let controller =
+        DictationController::new_with_notifier(recorder, transcriber, injector, notifier);
 
     eprintln!("trec daemon listening on {}", socket_path.display());
     match run_daemon(&socket_path, controller).await {
