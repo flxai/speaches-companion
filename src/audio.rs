@@ -2,9 +2,10 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 pub const SAMPLE_RATE: u32 = 24_000;
@@ -12,6 +13,11 @@ pub const CHANNELS: u16 = 1;
 pub const SAMPLE_FORMAT: &str = "s16";
 pub const CHUNK_BYTES: usize = 4_096;
 pub const STT_SAMPLE_RATE: u32 = 16_000;
+
+pub struct RawPcmRecording {
+    child: Child,
+    read_task: JoinHandle<Result<Vec<u8>>>,
+}
 
 pub async fn capture_with_pw_record<F, Fut>(duration: Duration, mut on_chunk: F) -> Result<usize>
 where
@@ -65,6 +71,99 @@ where
     let _ = child.start_kill();
     let _ = child.wait().await;
     Ok(total_bytes)
+}
+
+pub async fn start_raw_pcm_recording(sample_rate: u32) -> Result<RawPcmRecording> {
+    let mut child = Command::new("pw-record")
+        .args([
+            "--raw",
+            "--rate",
+            &sample_rate.to_string(),
+            "--channels",
+            &CHANNELS.to_string(),
+            "--format",
+            SAMPLE_FORMAT,
+            "-",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("failed to start pw-record")?;
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("pw-record did not expose stdout")?;
+    let read_task = tokio::spawn(async move {
+        let mut pcm = Vec::new();
+        let mut chunk = vec![0u8; CHUNK_BYTES];
+        loop {
+            let read = stdout
+                .read(&mut chunk)
+                .await
+                .context("failed to read from pw-record")?;
+            if read == 0 {
+                break;
+            }
+            pcm.extend_from_slice(&chunk[..read]);
+        }
+        Ok(pcm)
+    });
+
+    Ok(RawPcmRecording { child, read_task })
+}
+
+pub async fn stop_raw_pcm_recording(
+    mut recording: RawPcmRecording,
+    output_path: &Path,
+    sample_rate: u32,
+) -> Result<()> {
+    let _ = recording.child.start_kill();
+    let _ = recording.child.wait().await;
+
+    let pcm = recording
+        .read_task
+        .await
+        .context("pw-record reader task panicked")??;
+    if pcm.is_empty() {
+        bail!("recording stopped before any audio was captured");
+    }
+
+    write_pcm_wav(output_path, &pcm, sample_rate).await
+}
+
+pub async fn write_pcm_wav(path: &Path, pcm: &[u8], sample_rate: u32) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let data_len = u32::try_from(pcm.len()).context("recording is too large for WAV")?;
+    let channels = CHANNELS;
+    let bits_per_sample = 16u16;
+    let byte_rate = sample_rate * u32::from(channels) * u32::from(bits_per_sample / 8);
+    let block_align = channels * (bits_per_sample / 8);
+
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36u32 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&channels.to_le_bytes());
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(pcm);
+
+    tokio::fs::write(path, wav)
+        .await
+        .with_context(|| format!("failed to write WAV file {}", path.display()))
 }
 
 pub async fn record_wav_with_pw_record(

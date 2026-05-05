@@ -5,6 +5,10 @@ use clap::{Args, Parser, Subcommand};
 use trec::audio::{record_wav_with_pw_record, STT_SAMPLE_RATE};
 use trec::config::{resolve_config, ConfigInput};
 use trec::daemon::run_daemon;
+use trec::dictation::{
+    default_recording_dir, DictationController, PwRecordRecorder, SpeachesTranscriber,
+};
+use trec::inject::{LibXdoTextInjector, TextInjector};
 use trec::ipc::{default_socket_path, send_command, IpcCommand};
 use trec::phase::PhaseResult;
 use trec::realtime::run_dictate_live;
@@ -22,6 +26,7 @@ enum Command {
     Daemon(DaemonArgs),
     DictateLive(DictateLiveArgs),
     Hotkey(HotkeyArgs),
+    Inject(InjectArgs),
     Smoke(SmokeArgs),
     Transcribe(TranscribeArgs),
 }
@@ -30,6 +35,14 @@ enum Command {
 struct DaemonArgs {
     #[arg(long)]
     socket_path: Option<PathBuf>,
+    #[arg(long)]
+    base_url: Option<String>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    language: Option<String>,
+    #[arg(long)]
+    record_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -52,6 +65,13 @@ struct HotkeyArgs {
     action: HotkeyAction,
     #[arg(long)]
     socket_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct InjectArgs {
+    text: String,
+    #[arg(long, default_value = "0")]
+    delay_microsecs: u32,
 }
 
 #[derive(Debug, Args)]
@@ -107,6 +127,7 @@ async fn main() -> ExitCode {
         Command::Daemon(args) => run_daemon_command(args).await,
         Command::DictateLive(args) => run_dictate_live_command(args).await,
         Command::Hotkey(args) => run_hotkey_command(args).await,
+        Command::Inject(args) => run_inject_command(args).await,
         Command::Smoke(args) => run_smoke_command(args).await,
         Command::Transcribe(args) => run_transcribe_command(args).await,
     }
@@ -114,8 +135,34 @@ async fn main() -> ExitCode {
 
 async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     let socket_path = args.socket_path.unwrap_or_else(default_socket_path);
+    let config = resolve_config(ConfigInput {
+        cli_base_url: args.base_url,
+        cli_model: args.model,
+        cli_language: args.language,
+        env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
+        env_model: std::env::var("TREC_MODEL")
+            .ok()
+            .or_else(|| std::env::var("SPEACHES_STT_MODEL").ok()),
+        env_language: std::env::var("TREC_LANGUAGE").ok(),
+        ..ConfigInput::default()
+    });
+    let transcriber = SpeachesTranscriber::new(
+        config.base_url,
+        TranscribeOptions {
+            model: config.model,
+            response_format: ResponseFormat::Text,
+            language: config.language,
+            prompt: None,
+            hotwords: None,
+            without_timestamps: true,
+        },
+    );
+    let recorder = PwRecordRecorder::new(args.record_dir.unwrap_or_else(default_recording_dir));
+    let injector = LibXdoTextInjector::default();
+    let controller = DictationController::new(recorder, transcriber, injector);
+
     eprintln!("trec daemon listening on {}", socket_path.display());
-    match run_daemon(&socket_path).await {
+    match run_daemon(&socket_path, controller).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("trec daemon failed: {error:#}");
@@ -140,6 +187,17 @@ async fn run_hotkey_command(args: HotkeyArgs) -> ExitCode {
         }
         Err(error) => {
             eprintln!("trec hotkey failed: {error:#}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn run_inject_command(args: InjectArgs) -> ExitCode {
+    let injector = LibXdoTextInjector::new(args.delay_microsecs);
+    match injector.inject_text(&args.text) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("inject failed: {error:#}");
             ExitCode::from(1)
         }
     }

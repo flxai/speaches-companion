@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
+use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
@@ -13,6 +14,11 @@ use crate::ipc::IpcCommand;
 #[derive(Debug, Default)]
 pub struct DaemonState {
     recording: bool,
+}
+
+#[async_trait]
+pub trait HotkeyHandler: Send {
+    async fn handle_hotkey(&mut self, command: IpcCommand) -> anyhow::Result<DaemonResponse>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +61,10 @@ impl DaemonState {
     }
 }
 
-pub async fn run_daemon(socket_path: &Path) -> anyhow::Result<()> {
+pub async fn run_daemon<H>(socket_path: &Path, handler: H) -> anyhow::Result<()>
+where
+    H: HotkeyHandler + 'static,
+{
     prepare_socket_path(socket_path).await?;
     let listener = UnixListener::bind(socket_path).with_context(|| {
         format!(
@@ -63,16 +72,16 @@ pub async fn run_daemon(socket_path: &Path) -> anyhow::Result<()> {
             socket_path.display()
         )
     })?;
-    let state = Arc::new(Mutex::new(DaemonState::default()));
+    let handler = Arc::new(Mutex::new(handler));
 
     loop {
         let (stream, _) = listener
             .accept()
             .await
             .context("failed to accept trec IPC client")?;
-        let state = Arc::clone(&state);
+        let handler = Arc::clone(&handler);
         tokio::spawn(async move {
-            if let Err(error) = handle_client(stream, state).await {
+            if let Err(error) = handle_client(stream, handler).await {
                 eprintln!("trec daemon client error: {error:#}");
             }
         });
@@ -108,7 +117,7 @@ async fn prepare_socket_path(socket_path: &Path) -> anyhow::Result<()> {
 
 async fn handle_client(
     mut stream: tokio::net::UnixStream,
-    state: Arc<Mutex<DaemonState>>,
+    handler: Arc<Mutex<impl HotkeyHandler + 'static>>,
 ) -> anyhow::Result<()> {
     let mut request = String::new();
     stream
@@ -117,8 +126,8 @@ async fn handle_client(
         .context("failed to read trec IPC request")?;
     let command = parse_command(&request)?;
     let response = {
-        let mut state = state.lock().await;
-        state.handle(command)
+        let mut handler = handler.lock().await;
+        handler.handle_hotkey(command).await?
     };
     stream
         .write_all(format!("{}\n", response.as_str()).as_bytes())

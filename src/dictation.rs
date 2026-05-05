@@ -1,0 +1,187 @@
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use async_trait::async_trait;
+
+use crate::audio::{
+    start_raw_pcm_recording, stop_raw_pcm_recording, RawPcmRecording, STT_SAMPLE_RATE,
+};
+use crate::daemon::{DaemonResponse, HotkeyHandler};
+use crate::inject::{normalize_transcript_for_injection, TextInjector};
+use crate::ipc::IpcCommand;
+use crate::stt::{transcribe_file, TranscribeOptions};
+
+#[async_trait]
+pub trait Recorder: Send + Sync {
+    type Recording: Send;
+
+    async fn start(&self) -> anyhow::Result<Self::Recording>;
+    async fn stop(&self, recording: Self::Recording) -> anyhow::Result<PathBuf>;
+}
+
+#[async_trait]
+pub trait Transcriber: Send + Sync {
+    async fn transcribe(&self, audio_path: &Path) -> anyhow::Result<String>;
+}
+
+pub struct DictationController<R, T, I>
+where
+    R: Recorder,
+    T: Transcriber,
+    I: TextInjector,
+{
+    recorder: R,
+    transcriber: T,
+    injector: I,
+    recording: Option<R::Recording>,
+}
+
+impl<R, T, I> DictationController<R, T, I>
+where
+    R: Recorder,
+    T: Transcriber,
+    I: TextInjector,
+{
+    pub fn new(recorder: R, transcriber: T, injector: I) -> Self {
+        Self {
+            recorder,
+            transcriber,
+            injector,
+            recording: None,
+        }
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.recording.is_some()
+    }
+}
+
+#[async_trait]
+impl<R, T, I> HotkeyHandler for DictationController<R, T, I>
+where
+    R: Recorder + Send,
+    T: Transcriber + Send,
+    I: TextInjector + Send,
+{
+    async fn handle_hotkey(&mut self, command: IpcCommand) -> anyhow::Result<DaemonResponse> {
+        match command {
+            IpcCommand::HotkeyDown => self.start_recording().await,
+            IpcCommand::HotkeyUp => self.stop_transcribe_and_inject().await,
+        }
+    }
+}
+
+impl<R, T, I> DictationController<R, T, I>
+where
+    R: Recorder,
+    T: Transcriber,
+    I: TextInjector,
+{
+    async fn start_recording(&mut self) -> anyhow::Result<DaemonResponse> {
+        if self.recording.is_some() {
+            return Ok(DaemonResponse::AlreadyRecording);
+        }
+
+        self.recording = Some(self.recorder.start().await?);
+        Ok(DaemonResponse::Started)
+    }
+
+    async fn stop_transcribe_and_inject(&mut self) -> anyhow::Result<DaemonResponse> {
+        let Some(recording) = self.recording.take() else {
+            return Ok(DaemonResponse::AlreadyIdle);
+        };
+
+        let audio_path = self.recorder.stop(recording).await?;
+        let transcript = self.transcriber.transcribe(&audio_path).await?;
+        if let Some(text) = normalize_transcript_for_injection(&transcript) {
+            self.injector.inject_text(&text)?;
+        }
+
+        Ok(DaemonResponse::Stopped)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PwRecordRecorder {
+    output_dir: PathBuf,
+    sample_rate: u32,
+}
+
+impl PwRecordRecorder {
+    pub fn new(output_dir: PathBuf) -> Self {
+        Self {
+            output_dir,
+            sample_rate: STT_SAMPLE_RATE,
+        }
+    }
+
+    pub fn with_sample_rate(mut self, sample_rate: u32) -> Self {
+        self.sample_rate = sample_rate;
+        self
+    }
+}
+
+pub struct PwRecording {
+    inner: RawPcmRecording,
+    output_path: PathBuf,
+    sample_rate: u32,
+}
+
+#[async_trait]
+impl Recorder for PwRecordRecorder {
+    type Recording = PwRecording;
+
+    async fn start(&self) -> anyhow::Result<Self::Recording> {
+        let output_path = self.output_dir.join(recording_file_name());
+        let inner = start_raw_pcm_recording(self.sample_rate).await?;
+        Ok(PwRecording {
+            inner,
+            output_path,
+            sample_rate: self.sample_rate,
+        })
+    }
+
+    async fn stop(&self, recording: Self::Recording) -> anyhow::Result<PathBuf> {
+        stop_raw_pcm_recording(
+            recording.inner,
+            &recording.output_path,
+            recording.sample_rate,
+        )
+        .await?;
+        Ok(recording.output_path)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SpeachesTranscriber {
+    base_url: String,
+    options: TranscribeOptions,
+}
+
+impl SpeachesTranscriber {
+    pub fn new(base_url: String, options: TranscribeOptions) -> Self {
+        Self { base_url, options }
+    }
+}
+
+#[async_trait]
+impl Transcriber for SpeachesTranscriber {
+    async fn transcribe(&self, audio_path: &Path) -> anyhow::Result<String> {
+        transcribe_file(&self.base_url, audio_path, &self.options).await
+    }
+}
+
+pub fn default_recording_dir() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("trec-recordings")
+}
+
+fn recording_file_name() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    format!("trec-{}-{millis}.wav", std::process::id())
+}

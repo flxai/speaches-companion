@@ -1,7 +1,9 @@
 pub mod audio;
 pub mod config;
 pub mod daemon;
+pub mod dictation;
 pub mod event;
+pub mod inject;
 pub mod ipc;
 pub mod phase;
 pub mod realtime;
