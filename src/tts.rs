@@ -112,8 +112,13 @@ pub async fn write_speech_temp_file(
     Ok(path)
 }
 
-pub async fn play_audio_file(path: &Path, player: &str) -> anyhow::Result<()> {
+pub async fn play_audio_file(
+    path: &Path,
+    player: &str,
+    player_args: &[String],
+) -> anyhow::Result<()> {
     let status = Command::new(player)
+        .args(player_args)
         .arg(path)
         .status()
         .await

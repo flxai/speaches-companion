@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use speaches_scribe::audio::{record_wav_with_pw_record, STT_SAMPLE_RATE};
 use speaches_scribe::config::{
     load_file_config, resolve_config, resolve_tts_config, ConfigInput, FileConfig, TtsConfig,
@@ -135,6 +135,8 @@ struct ReadAloudArgs {
     response_format: Option<String>,
     #[arg(long)]
     player: Option<String>,
+    #[arg(long = "player-arg", action = ArgAction::Append, allow_hyphen_values = true)]
+    player_args: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -415,6 +417,7 @@ where
         args.voice,
         args.response_format,
         args.player,
+        args.player_args,
         &file_config,
     ));
     let result = read_aloud(args.text, config).await;
@@ -440,7 +443,7 @@ async fn read_aloud(text: Option<String>, config: TtsConfig) -> anyhow::Result<(
     };
     let audio = synthesize_speech(&config.base_url, &text, &options).await?;
     let audio_path = write_speech_temp_file(&audio, &config.response_format).await?;
-    let play_result = play_audio_file(&audio_path, &config.player).await;
+    let play_result = play_audio_file(&audio_path, &config.player, &config.player_args).await;
     if let Err(error) = tokio::fs::remove_file(&audio_path).await {
         eprintln!(
             "speaches-scribe failed to remove temporary speech audio {}: {error:#}",
@@ -464,6 +467,17 @@ fn env_or(primary: &str, fallback: &str) -> Option<String> {
     std::env::var(primary)
         .ok()
         .or_else(|| std::env::var(fallback).ok())
+}
+
+fn env_args_or(primary: &str, fallback: &str) -> Option<Vec<String>> {
+    env_or(primary, fallback)
+        .map(|value| {
+            value
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|args| !args.is_empty())
 }
 
 fn load_command_file_config(config_path: Option<PathBuf>) -> Result<FileConfig, ExitCode> {
@@ -503,6 +517,7 @@ fn tts_config_input(
     cli_voice: Option<String>,
     cli_response_format: Option<String>,
     cli_player: Option<String>,
+    cli_player_args: Vec<String>,
     file_config: &FileConfig,
 ) -> TtsConfigInput {
     TtsConfigInput {
@@ -511,6 +526,7 @@ fn tts_config_input(
         cli_voice,
         cli_response_format,
         cli_player,
+        cli_player_args,
         env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
         env_model: env_or("SPEACHES_SCRIBE_TTS_MODEL", "SPEACHES_TTS_MODEL"),
         env_voice: env_or("SPEACHES_SCRIBE_TTS_VOICE", "SPEACHES_TTS_VOICE"),
@@ -519,11 +535,16 @@ fn tts_config_input(
             "SPEACHES_TTS_RESPONSE_FORMAT",
         ),
         env_player: env_or("SPEACHES_SCRIBE_TTS_PLAYER", "SPEACHES_TTS_PLAYER"),
+        env_player_args: env_args_or(
+            "SPEACHES_SCRIBE_TTS_PLAYER_ARGS",
+            "SPEACHES_TTS_PLAYER_ARGS",
+        ),
         file_base_url: file_config.speaches.base_url.clone(),
         file_model: file_config.tts.model.clone(),
         file_voice: file_config.tts.voice.clone(),
         file_response_format: file_config.tts.response_format.clone(),
         file_player: file_config.tts.player.clone(),
+        file_player_args: file_config.tts.player_args.clone(),
     }
 }
 
@@ -797,6 +818,10 @@ mod tests {
             "wav",
             "--player",
             "pw-play",
+            "--player-arg=--raw",
+            "--player-arg=--rate",
+            "--player-arg",
+            "24000",
         ])
         .command
         {
@@ -806,6 +831,7 @@ mod tests {
                 assert_eq!(args.voice.as_deref(), Some("lessac"));
                 assert_eq!(args.response_format.as_deref(), Some("wav"));
                 assert_eq!(args.player.as_deref(), Some("pw-play"));
+                assert_eq!(args.player_args, ["--raw", "--rate", "24000"]);
             }
             _ => panic!("expected read-aloud command"),
         }

@@ -82,6 +82,7 @@ fn tts_defaults_use_speaches_audio_speech_values() {
     assert_eq!(config.voice, DEFAULT_TTS_VOICE);
     assert_eq!(config.response_format, DEFAULT_TTS_RESPONSE_FORMAT);
     assert_eq!(config.player, DEFAULT_TTS_PLAYER);
+    assert!(config.player_args.is_empty());
 }
 
 #[test]
@@ -92,16 +93,19 @@ fn tts_cli_values_override_environment_values() {
         cli_voice: Some("cli-voice".to_string()),
         cli_response_format: Some("mp3".to_string()),
         cli_player: Some("cli-player".to_string()),
+        cli_player_args: vec!["--cli".to_string()],
         env_base_url: Some("http://env.example:8000".to_string()),
         env_model: Some("env-tts".to_string()),
         env_voice: Some("env-voice".to_string()),
         env_response_format: Some("wav".to_string()),
         env_player: Some("env-player".to_string()),
+        env_player_args: Some(vec!["--env".to_string()]),
         file_base_url: Some("http://file.example:8000".to_string()),
         file_model: Some("file-tts".to_string()),
         file_voice: Some("file-voice".to_string()),
         file_response_format: Some("opus".to_string()),
         file_player: Some("file-player".to_string()),
+        file_player_args: vec!["--file".to_string()],
     });
 
     assert_eq!(config.base_url, "http://cli.example:9000");
@@ -109,6 +113,7 @@ fn tts_cli_values_override_environment_values() {
     assert_eq!(config.voice, "cli-voice");
     assert_eq!(config.response_format, "mp3");
     assert_eq!(config.player, "cli-player");
+    assert_eq!(config.player_args, ["--cli"]);
 }
 
 #[test]
@@ -119,6 +124,11 @@ fn file_tts_values_override_defaults() {
         file_voice: Some("file-voice".to_string()),
         file_response_format: Some("opus".to_string()),
         file_player: Some("file-player".to_string()),
+        file_player_args: vec![
+            "--raw".to_string(),
+            "--rate".to_string(),
+            "24000".to_string(),
+        ],
         ..TtsConfigInput::default()
     });
 
@@ -127,6 +137,7 @@ fn file_tts_values_override_defaults() {
     assert_eq!(config.voice, "file-voice");
     assert_eq!(config.response_format, "opus");
     assert_eq!(config.player, "file-player");
+    assert_eq!(config.player_args, ["--raw", "--rate", "24000"]);
 }
 
 #[test]
@@ -148,6 +159,7 @@ model = "tts-model"
 voice = "lessac"
 response_format = "wav"
 player = "pw-play"
+player_args = ["--raw", "--rate", "24000"]
 
 [dictation]
 transcript_dir = "transcripts"
@@ -174,6 +186,7 @@ preroll_ms = 1000
     assert_eq!(config.tts.voice.as_deref(), Some("lessac"));
     assert_eq!(config.tts.response_format.as_deref(), Some("wav"));
     assert_eq!(config.tts.player.as_deref(), Some("pw-play"));
+    assert_eq!(config.tts.player_args, ["--raw", "--rate", "24000"]);
     assert_eq!(
         config.dictation.transcript_dir.as_deref(),
         Some(Path::new("transcripts"))

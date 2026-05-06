@@ -1,7 +1,8 @@
 use httpmock::prelude::*;
 use speaches_scribe::tts::{
-    normalize_read_aloud_text, speech_url, synthesize_speech, SpeechOptions,
+    normalize_read_aloud_text, play_audio_file, speech_url, synthesize_speech, SpeechOptions,
 };
+use tempfile::tempdir;
 
 #[test]
 fn speech_url_uses_openai_compatible_audio_speech_path() {
@@ -47,4 +48,32 @@ async fn synthesize_speech_posts_openai_compatible_json() {
 
     mock.assert();
     assert_eq!(audio, b"RIFF fake wav");
+}
+
+#[tokio::test]
+async fn play_audio_file_passes_player_args_before_path() {
+    let dir = tempdir().unwrap();
+    let audio_path = dir.path().join("audio.pcm");
+    let args_path = dir.path().join("args.txt");
+    std::fs::write(&audio_path, b"fake audio").unwrap();
+
+    play_audio_file(
+        &audio_path,
+        "sh",
+        &[
+            "-c".to_string(),
+            format!("printf '%s\\n' \"$@\" > {}", args_path.display()),
+            "sh".to_string(),
+            "--raw".to_string(),
+            "--rate".to_string(),
+            "24000".to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(args_path).unwrap(),
+        format!("--raw\n--rate\n24000\n{}\n", audio_path.display())
+    );
 }

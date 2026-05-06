@@ -44,6 +44,8 @@ pub struct TtsFileConfig {
     pub voice: Option<String>,
     pub response_format: Option<String>,
     pub player: Option<String>,
+    #[serde(default)]
+    pub player_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -80,6 +82,7 @@ pub struct TtsConfig {
     pub voice: String,
     pub response_format: String,
     pub player: String,
+    pub player_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -104,16 +107,19 @@ pub struct TtsConfigInput {
     pub cli_voice: Option<String>,
     pub cli_response_format: Option<String>,
     pub cli_player: Option<String>,
+    pub cli_player_args: Vec<String>,
     pub env_base_url: Option<String>,
     pub env_model: Option<String>,
     pub env_voice: Option<String>,
     pub env_response_format: Option<String>,
     pub env_player: Option<String>,
+    pub env_player_args: Option<Vec<String>>,
     pub file_base_url: Option<String>,
     pub file_model: Option<String>,
     pub file_voice: Option<String>,
     pub file_response_format: Option<String>,
     pub file_player: Option<String>,
+    pub file_player_args: Vec<String>,
 }
 
 pub fn resolve_config(input: ConfigInput) -> DictateLiveConfig {
@@ -177,6 +183,11 @@ pub fn resolve_tts_config(input: TtsConfigInput) -> TtsConfig {
             input.env_player,
             input.file_player,
             DEFAULT_TTS_PLAYER,
+        ),
+        player_args: choose_vec(
+            input.cli_player_args,
+            input.env_player_args,
+            input.file_player_args,
         ),
     }
 }
@@ -274,6 +285,19 @@ fn choose(cli: Option<String>, env: Option<String>, file: Option<String>, defaul
         .or_else(|| env.and_then(non_empty_string))
         .or_else(|| file.and_then(non_empty_string))
         .unwrap_or_else(|| default.to_string())
+}
+
+fn choose_vec(cli: Vec<String>, env: Option<Vec<String>>, file: Vec<String>) -> Vec<String> {
+    if !cli.is_empty() {
+        return cli;
+    }
+    if let Some(env) = env.filter(|args| !args.is_empty()) {
+        return env;
+    }
+    if !file.is_empty() {
+        return file;
+    }
+    Vec::new()
 }
 
 fn non_empty_string(value: String) -> Option<String> {
