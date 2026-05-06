@@ -2,31 +2,11 @@ use std::ffi::CString;
 
 use anyhow::{bail, Context};
 
-const X_CURRENT_TIME: libc::c_ulong = 0;
-const X_GRAB_MODE_ASYNC: libc::c_int = 1;
-const X_GRAB_SUCCESS: libc::c_int = 0;
-
-unsafe extern "C" {
-    fn XGrabKeyboard(
-        display: *mut libc::c_void,
-        grab_window: libc::c_ulong,
-        owner_events: libc::c_int,
-        pointer_mode: libc::c_int,
-        keyboard_mode: libc::c_int,
-        time: libc::c_ulong,
-    ) -> libc::c_int;
-    fn XUngrabKeyboard(display: *mut libc::c_void, time: libc::c_ulong) -> libc::c_int;
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FocusedWindow(pub u64);
 
 pub trait TextInjector: Send + Sync {
     fn inject_text(&self, text: &str) -> anyhow::Result<()>;
-
-    fn inject_text_into(&self, _window: FocusedWindow, text: &str) -> anyhow::Result<()> {
-        self.inject_text(text)
-    }
 
     fn erase_chars(&self, count: usize) -> anyhow::Result<()> {
         if count == 0 {
@@ -34,10 +14,6 @@ pub trait TextInjector: Send + Sync {
         }
 
         bail!("text injector does not support erasing {count} characters")
-    }
-
-    fn erase_chars_from(&self, _window: FocusedWindow, count: usize) -> anyhow::Result<()> {
-        self.erase_chars(count)
     }
 
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
@@ -64,21 +40,21 @@ impl TextInjector for LibXdoTextInjector {
 
         let xdo = RawXdo::new()?;
         xdo.with_cleared_modifiers(|| {
-            xdo.enter_text_window(libxdo_sys::CURRENTWINDOW, text, self.delay_microsecs)
+            let text = CString::new(text).context("text contains an interior NUL byte")?;
+            let code = unsafe {
+                libxdo_sys::xdo_enter_text_window(
+                    xdo.handle,
+                    libxdo_sys::CURRENTWINDOW,
+                    text.as_ptr(),
+                    self.delay_microsecs,
+                )
+            };
+            if code != 0 {
+                bail!("failed to type text through libxdo: error code {code}");
+            }
+            Ok(())
         })
         .context("libxdo text injection failed")
-    }
-
-    fn inject_text_into(&self, window: FocusedWindow, text: &str) -> anyhow::Result<()> {
-        if text.is_empty() {
-            return Ok(());
-        }
-
-        let xdo = RawXdo::new()?;
-        xdo.with_silenced_modifiers_for_window(window.0, || {
-            xdo.enter_text_window(window.0, text, self.delay_microsecs)
-        })
-        .context("libxdo targeted text injection failed")
     }
 
     fn erase_chars(&self, count: usize) -> anyhow::Result<()> {
@@ -94,21 +70,6 @@ impl TextInjector for LibXdoTextInjector {
             Ok(())
         })
         .context("libxdo text erasure failed")
-    }
-
-    fn erase_chars_from(&self, window: FocusedWindow, count: usize) -> anyhow::Result<()> {
-        if count == 0 {
-            return Ok(());
-        }
-
-        let xdo = RawXdo::new()?;
-        xdo.with_silenced_modifiers_for_window(window.0, || {
-            for _ in 0..count {
-                xdo.send_keysequence_window(window.0, "BackSpace", self.delay_microsecs)?;
-            }
-            Ok(())
-        })
-        .context("libxdo targeted text erasure failed")
     }
 
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
@@ -135,38 +96,13 @@ impl RawXdo {
         Ok(Self { handle })
     }
 
-    fn enter_text_window(
-        &self,
-        window: libc::c_ulong,
-        text: &str,
-        delay_microsecs: u32,
-    ) -> anyhow::Result<()> {
-        let text = CString::new(text).context("text contains an interior NUL byte")?;
-        let code = unsafe {
-            libxdo_sys::xdo_enter_text_window(self.handle, window, text.as_ptr(), delay_microsecs)
-        };
-        if code != 0 {
-            bail!("failed to type text through libxdo: error code {code}");
-        }
-        Ok(())
-    }
-
     fn send_keysequence(&self, keysequence: &str, delay_microsecs: u32) -> anyhow::Result<()> {
-        self.send_keysequence_window(libxdo_sys::CURRENTWINDOW, keysequence, delay_microsecs)
-    }
-
-    fn send_keysequence_window(
-        &self,
-        window: libc::c_ulong,
-        keysequence: &str,
-        delay_microsecs: u32,
-    ) -> anyhow::Result<()> {
         let keysequence =
             CString::new(keysequence).context("key sequence contains an interior NUL byte")?;
         let code = unsafe {
             libxdo_sys::xdo_send_keysequence_window(
                 self.handle,
-                window,
+                libxdo_sys::CURRENTWINDOW,
                 keysequence.as_ptr(),
                 delay_microsecs,
             )
@@ -181,14 +117,6 @@ impl RawXdo {
         &self,
         operation: impl FnOnce() -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        self.with_cleared_modifiers_for_window(libxdo_sys::CURRENTWINDOW, operation)
-    }
-
-    fn with_cleared_modifiers_for_window(
-        &self,
-        window: libc::c_ulong,
-        operation: impl FnOnce() -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
         let mut active_mods = std::ptr::null_mut();
         let mut active_mods_len = 0;
         let code = unsafe {
@@ -202,43 +130,9 @@ impl RawXdo {
             bail!("failed to read active X11 modifiers through libxdo: error code {code}");
         }
 
-        let clear_result = self.clear_active_modifiers(window, active_mods, active_mods_len);
+        let clear_result = self.clear_active_modifiers(active_mods, active_mods_len);
         let operation_result = clear_result.and_then(|()| operation());
-        let restore_result = self.restore_active_modifiers(window, active_mods, active_mods_len);
-        if !active_mods.is_null() {
-            unsafe { libc::free(active_mods.cast()) };
-        }
-
-        operation_result?;
-        restore_result?;
-        Ok(())
-    }
-
-    fn with_silenced_modifiers_for_window(
-        &self,
-        window: libc::c_ulong,
-        operation: impl FnOnce() -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        let mut active_mods = std::ptr::null_mut();
-        let mut active_mods_len = 0;
-        let code = unsafe {
-            libxdo_sys::xdo_get_active_modifiers(
-                self.handle,
-                &mut active_mods,
-                &mut active_mods_len,
-            )
-        };
-        if code != 0 {
-            bail!("failed to read active X11 modifiers through libxdo: error code {code}");
-        }
-
-        let clear_result = self.with_grabbed_keyboard(window, || {
-            self.clear_active_modifiers(window, active_mods, active_mods_len)
-        });
-        let operation_result = clear_result.and_then(|()| operation());
-        let restore_result = self.with_grabbed_keyboard(window, || {
-            self.restore_active_modifiers(window, active_mods, active_mods_len)
-        });
+        let restore_result = self.restore_active_modifiers(active_mods, active_mods_len);
         if !active_mods.is_null() {
             unsafe { libc::free(active_mods.cast()) };
         }
@@ -250,7 +144,6 @@ impl RawXdo {
 
     fn clear_active_modifiers(
         &self,
-        window: libc::c_ulong,
         active_mods: *mut libxdo_sys::charcodemap_t,
         active_mods_len: i32,
     ) -> anyhow::Result<()> {
@@ -261,7 +154,7 @@ impl RawXdo {
         let code = unsafe {
             libxdo_sys::xdo_clear_active_modifiers(
                 self.handle,
-                window,
+                libxdo_sys::CURRENTWINDOW,
                 active_mods,
                 active_mods_len,
             )
@@ -274,7 +167,6 @@ impl RawXdo {
 
     fn restore_active_modifiers(
         &self,
-        window: libc::c_ulong,
         active_mods: *mut libxdo_sys::charcodemap_t,
         active_mods_len: i32,
     ) -> anyhow::Result<()> {
@@ -283,39 +175,17 @@ impl RawXdo {
         }
 
         let code = unsafe {
-            libxdo_sys::xdo_set_active_modifiers(self.handle, window, active_mods, active_mods_len)
+            libxdo_sys::xdo_set_active_modifiers(
+                self.handle,
+                libxdo_sys::CURRENTWINDOW,
+                active_mods,
+                active_mods_len,
+            )
         };
         if code != 0 {
             bail!("failed to restore active X11 modifiers through libxdo: error code {code}");
         }
         Ok(())
-    }
-
-    fn with_grabbed_keyboard(
-        &self,
-        window: libc::c_ulong,
-        operation: impl FnOnce() -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        let display = unsafe { (*self.handle).xdpy.cast::<libc::c_void>() };
-        let grab_code = unsafe {
-            XGrabKeyboard(
-                display,
-                window,
-                1,
-                X_GRAB_MODE_ASYNC,
-                X_GRAB_MODE_ASYNC,
-                X_CURRENT_TIME,
-            )
-        };
-        if grab_code != X_GRAB_SUCCESS {
-            bail!("failed to grab X11 keyboard: error code {grab_code}");
-        }
-
-        let operation_result = operation();
-        unsafe {
-            XUngrabKeyboard(display, X_CURRENT_TIME);
-        }
-        operation_result
     }
 }
 
@@ -358,13 +228,8 @@ where
         let prefix_bytes = common_prefix_byte_len(&self.inserted_text, text);
         let erase_count = self.inserted_text[prefix_bytes..].chars().count();
         let text_suffix = &text[prefix_bytes..];
-        if let Some(target_window) = self.target_window {
-            self.injector.erase_chars_from(target_window, erase_count)?;
-            self.injector.inject_text_into(target_window, text_suffix)?;
-        } else {
-            self.injector.erase_chars(erase_count)?;
-            self.injector.inject_text(text_suffix)?;
-        }
+        self.injector.erase_chars(erase_count)?;
+        self.injector.inject_text(text_suffix)?;
         self.inserted_text = text.to_string();
         Ok(true)
     }
@@ -504,46 +369,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn speculative_replacement_targets_captured_window() {
-        let injector = FakeInjector::with_focused_window(FocusedWindow(42));
-        let operations = injector.operations.clone();
-        let mut session = SpeculativeTextSession::start(injector).unwrap();
-
-        session.replace_text("💬").unwrap();
-        session.replace_text("hello").unwrap();
-
-        assert_eq!(
-            *operations.lock().unwrap(),
-            vec![
-                InjectOperation::TypeInto(FocusedWindow(42), "💬".to_string()),
-                InjectOperation::BackspaceFrom(FocusedWindow(42), 1),
-                InjectOperation::TypeInto(FocusedWindow(42), "hello".to_string()),
-            ]
-        );
-    }
-
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum InjectOperation {
         Type(String),
-        TypeInto(FocusedWindow, String),
         Backspace(usize),
-        BackspaceFrom(FocusedWindow, usize),
     }
 
     #[derive(Clone, Default)]
     struct FakeInjector {
         operations: Arc<Mutex<Vec<InjectOperation>>>,
-        focused_window: Option<FocusedWindow>,
-    }
-
-    impl FakeInjector {
-        fn with_focused_window(focused_window: FocusedWindow) -> Self {
-            Self {
-                operations: Arc::default(),
-                focused_window: Some(focused_window),
-            }
-        }
     }
 
     impl TextInjector for FakeInjector {
@@ -557,16 +391,6 @@ mod tests {
             Ok(())
         }
 
-        fn inject_text_into(&self, window: FocusedWindow, text: &str) -> anyhow::Result<()> {
-            if !text.is_empty() {
-                self.operations
-                    .lock()
-                    .unwrap()
-                    .push(InjectOperation::TypeInto(window, text.to_string()));
-            }
-            Ok(())
-        }
-
         fn erase_chars(&self, count: usize) -> anyhow::Result<()> {
             if count > 0 {
                 self.operations
@@ -575,20 +399,6 @@ mod tests {
                     .push(InjectOperation::Backspace(count));
             }
             Ok(())
-        }
-
-        fn erase_chars_from(&self, window: FocusedWindow, count: usize) -> anyhow::Result<()> {
-            if count > 0 {
-                self.operations
-                    .lock()
-                    .unwrap()
-                    .push(InjectOperation::BackspaceFrom(window, count));
-            }
-            Ok(())
-        }
-
-        fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
-            Ok(self.focused_window)
         }
     }
 }
