@@ -28,6 +28,14 @@ is transcribed and injected into the focused X11 window. If focus changes during
 a recording, `trec` stops editing the target window instead of sending
 Backspaces to the wrong place.
 
+On startup the daemon starts continuous `pw-record` capture before it accepts
+hotkey-driven dictation. If that capture cannot start, daemon startup fails
+instead of falling back to first-use recording. The daemon also attempts a short
+silent transcription request to warm the Speaches model/cache. While idle it
+keeps a rolling pre-roll window for recovery/debugging, but STT requests use a
+short capped pre-roll view with leading and trailing silence trimmed. When a
+recording starts, treat the listening marker as the ready-to-speak signal.
+
 Text payloads are injected through libxdo text entry with active modifiers
 temporarily cleared. Speculative replacement uses Backspace for the portion that
 changed.
@@ -57,6 +65,14 @@ cadence and pad if needed:
 ```sh
 nix run . -- daemon --partial-interval-ms 750 --partial-min-duration-ms 0
 nix run . -- daemon --leading-silence-ms 400
+nix run . -- daemon --preroll-ms 1000
+```
+
+To preserve the accepted partial and final transcripts without writing debug
+audio into a project directory:
+
+```sh
+nix run . -- daemon --transcript-dir target/trec-transcripts
 ```
 
 Speaches SSE transcription responses can be tested with:

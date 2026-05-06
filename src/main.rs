@@ -9,8 +9,7 @@ use trec::daemon::run_daemon;
 use trec::inject::{LibXdoTextInjector, TextInjector};
 use trec::ipc::{default_socket_path, send_command, IpcCommand};
 use trec::notification::{
-    DesktopErrorNotifier, ErrorNotifier, NoopErrorNotifier, NoopTranscriptNotifier,
-    HOTKEY_ERROR_SUMMARY,
+    DesktopErrorNotifier, ErrorNotifier, NoopTranscriptNotifier, HOTKEY_ERROR_SUMMARY,
 };
 use trec::phase::PhaseResult;
 use trec::realtime::run_dictate_live;
@@ -47,7 +46,7 @@ struct DaemonArgs {
     #[arg(long)]
     language: Option<String>,
     #[arg(long)]
-    record_dir: Option<PathBuf>,
+    transcript_dir: Option<PathBuf>,
     #[arg(long)]
     stream_response: bool,
     #[arg(long)]
@@ -64,6 +63,8 @@ struct DaemonArgs {
     partial_min_duration_ms: u64,
     #[arg(long, default_value = "250")]
     leading_silence_ms: u64,
+    #[arg(long, default_value = "750")]
+    preroll_ms: u64,
 }
 
 #[derive(Debug, Args)]
@@ -159,11 +160,12 @@ async fn main() -> ExitCode {
 async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     let listening_marker = resolve_listening_marker(&args);
     let inline_partials = resolve_inline_partials(&args);
+    let transcript_dir = args.transcript_dir.clone();
     let socket_path = args.socket_path.unwrap_or_else(default_socket_path);
-    if let Some(record_dir) = args.record_dir {
+    if let Some(transcript_dir) = transcript_dir.as_ref() {
         eprintln!(
-            "--record-dir is ignored by the streaming daemon: {}",
-            record_dir.display()
+            "trec preserving transcripts in {}",
+            transcript_dir.display()
         );
     }
     let config = resolve_config(ConfigInput {
@@ -191,13 +193,26 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     )
     .with_partial_interval(Duration::from_millis(args.partial_interval_ms))
     .with_partial_min_duration(Duration::from_millis(args.partial_min_duration_ms))
-    .with_leading_silence(Duration::from_millis(args.leading_silence_ms));
+    .with_leading_silence(Duration::from_millis(args.leading_silence_ms))
+    .with_preroll(Duration::from_millis(args.preroll_ms))
+    .with_transcript_dir(transcript_dir);
+    eprintln!("trec starting continuous audio capture...");
+    if let Err(error) = transcriber.prepare_capture().await {
+        eprintln!("trec failed to start continuous audio capture: {error:#}");
+        return ExitCode::from(1);
+    }
+    eprintln!("trec continuous audio capture ready");
+    eprintln!("trec warming transcription backend...");
+    match transcriber.warm_up_transcription().await {
+        Ok(()) => eprintln!("trec transcription backend ready"),
+        Err(error) => eprintln!("trec transcription warmup failed: {error:#}"),
+    }
     let injector = LibXdoTextInjector::default();
     let controller = StreamingDictationController::new_with_notifiers(
         transcriber,
         injector,
         NoopTranscriptNotifier,
-        NoopErrorNotifier,
+        DesktopErrorNotifier,
     )
     .with_listening_marker(listening_marker)
     .with_inline_partials(inline_partials);
@@ -386,7 +401,7 @@ mod tests {
         let notifier = FakeErrorNotifier::default();
         let notifications = notifier.notifications.clone();
 
-        let _exit_code = run_hotkey_command_with_notifier(
+        let exit_code = run_hotkey_command_with_notifier(
             HotkeyArgs {
                 action: HotkeyAction::Down,
                 socket_path: Some(socket_path.clone()),
@@ -395,6 +410,7 @@ mod tests {
         )
         .await;
 
+        assert_eq!(exit_code, ExitCode::from(1));
         let notifications = notifications.lock().unwrap();
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].0, HOTKEY_ERROR_SUMMARY);
@@ -415,6 +431,7 @@ mod tests {
             Some(DEFAULT_LISTENING_MARKER.to_string())
         );
         assert!(resolve_inline_partials(&args));
+        assert_eq!(args.preroll_ms, 750);
     }
 
     #[test]
@@ -432,6 +449,30 @@ mod tests {
 
         assert_eq!(resolve_listening_marker(&args), Some("...".to_string()));
         assert!(resolve_inline_partials(&args));
+    }
+
+    #[test]
+    fn daemon_accepts_custom_preroll() {
+        let args = parse_daemon_args(["trec", "daemon", "--preroll-ms", "1000"]);
+
+        assert_eq!(args.preroll_ms, 1_000);
+    }
+
+    #[test]
+    fn daemon_accepts_transcript_dir() {
+        let args = parse_daemon_args(["trec", "daemon", "--transcript-dir", "target/trec-debug"]);
+
+        assert_eq!(
+            args.transcript_dir,
+            Some(PathBuf::from("target/trec-debug"))
+        );
+    }
+
+    #[test]
+    fn daemon_rejects_record_dir() {
+        assert!(
+            Cli::try_parse_from(["trec", "daemon", "--record-dir", "target/trec-debug"]).is_err()
+        );
     }
 
     fn parse_daemon_args<const N: usize>(args: [&str; N]) -> DaemonArgs {
