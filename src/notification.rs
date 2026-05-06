@@ -4,6 +4,7 @@ pub const DICTATION_ERROR_SUMMARY: &str = "speaches-scribe dictation failed";
 pub const DICTATION_PARTIAL_SUMMARY: &str = "speaches-scribe dictating";
 pub const DICTATION_FINAL_SUMMARY: &str = "speaches-scribe dictation";
 pub const HOTKEY_ERROR_SUMMARY: &str = "speaches-scribe hotkey failed";
+pub const READ_ALOUD_ERROR_SUMMARY: &str = "speaches-scribe read-aloud failed";
 const TRANSCRIPT_NOTIFICATION_ID: u32 = 0x7472_6563;
 
 pub trait ErrorNotifier: Send + Sync {

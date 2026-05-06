@@ -40,7 +40,7 @@
           ];
           postInstall = ''
             wrapProgram "$out/bin/speaches-scribe" \
-              --prefix PATH : ${lib.makeBinPath [pkgs.pipewire]}
+              --prefix PATH : ${lib.makeBinPath [pkgs.pipewire pkgs.xclip]}
           '';
         });
 
@@ -144,6 +144,7 @@
         "dictate-live" = mkSubcommandApp "dictate-live" "Run realtime dictation";
         hotkey = mkSubcommandApp "hotkey" "Send a hotkey IPC command";
         inject = mkSubcommandApp "inject" "Type text into the focused X11 window";
+        "read-aloud" = mkSubcommandApp "read-aloud" "Read selected text aloud through Speaches TTS";
         smoke = mkSubcommandApp "smoke" "Run a microphone and STT smoke test";
         transcribe = mkSubcommandApp "transcribe" "Transcribe an audio file";
       };
@@ -160,6 +161,7 @@
           rust-analyzer
           rustc
           rustfmt
+          xclip
           xdotool
         ];
         shellHook = ''

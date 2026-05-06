@@ -2,19 +2,25 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use speaches_scribe::audio::{record_wav_with_pw_record, STT_SAMPLE_RATE};
-use speaches_scribe::config::{resolve_config, ConfigInput};
+use speaches_scribe::config::{resolve_config, resolve_tts_config, ConfigInput, TtsConfigInput};
 use speaches_scribe::daemon::run_daemon;
 use speaches_scribe::inject::{LibXdoTextInjector, TextInjector};
 use speaches_scribe::ipc::{default_socket_path, send_command, IpcCommand};
 use speaches_scribe::notification::{
     DesktopErrorNotifier, ErrorNotifier, NoopTranscriptNotifier, HOTKEY_ERROR_SUMMARY,
+    READ_ALOUD_ERROR_SUMMARY,
 };
 use speaches_scribe::phase::PhaseResult;
 use speaches_scribe::realtime::run_dictate_live;
 use speaches_scribe::streaming::{RollingHttpTranscriber, StreamingDictationController};
 use speaches_scribe::stt::{transcribe_file, ResponseFormat, TranscribeOptions};
+use speaches_scribe::tts::{
+    normalize_read_aloud_text, play_audio_file, selected_or_clipboard_text, synthesize_speech,
+    write_speech_temp_file, SpeechOptions,
+};
 
 const DEFAULT_LISTENING_MARKER: &str = "💬";
 
@@ -34,6 +40,7 @@ enum Command {
     DictateLive(DictateLiveArgs),
     Hotkey(HotkeyArgs),
     Inject(InjectArgs),
+    ReadAloud(ReadAloudArgs),
     Smoke(SmokeArgs),
     Transcribe(TranscribeArgs),
 }
@@ -100,6 +107,22 @@ struct InjectArgs {
 }
 
 #[derive(Debug, Args)]
+struct ReadAloudArgs {
+    #[arg(long)]
+    text: Option<String>,
+    #[arg(long)]
+    base_url: Option<String>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    voice: Option<String>,
+    #[arg(long)]
+    response_format: Option<String>,
+    #[arg(long, default_value = "pw-play")]
+    player: String,
+}
+
+#[derive(Debug, Args)]
 struct TranscribeArgs {
     audio: PathBuf,
     #[arg(long)]
@@ -155,6 +178,7 @@ async fn main() -> ExitCode {
         Command::DictateLive(args) => run_dictate_live_command(args).await,
         Command::Hotkey(args) => run_hotkey_command(args).await,
         Command::Inject(args) => run_inject_command(args).await,
+        Command::ReadAloud(args) => run_read_aloud_command(args).await,
         Command::Smoke(args) => run_smoke_command(args).await,
         Command::Transcribe(args) => run_transcribe_command(args).await,
     }
@@ -297,6 +321,80 @@ async fn run_inject_command(args: InjectArgs) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+async fn run_read_aloud_command(args: ReadAloudArgs) -> ExitCode {
+    run_read_aloud_command_with_notifier(args, DesktopErrorNotifier).await
+}
+
+async fn run_read_aloud_command_with_notifier<N>(args: ReadAloudArgs, notifier: N) -> ExitCode
+where
+    N: ErrorNotifier,
+{
+    let config = resolve_tts_config(TtsConfigInput {
+        cli_base_url: args.base_url,
+        cli_model: args.model,
+        cli_voice: args.voice,
+        cli_response_format: args.response_format,
+        env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
+        env_model: env_or("SPEACHES_SCRIBE_TTS_MODEL", "SPEACHES_TTS_MODEL"),
+        env_voice: env_or("SPEACHES_SCRIBE_TTS_VOICE", "SPEACHES_TTS_VOICE"),
+        env_response_format: env_or(
+            "SPEACHES_SCRIBE_TTS_RESPONSE_FORMAT",
+            "SPEACHES_TTS_RESPONSE_FORMAT",
+        ),
+    });
+    let result = read_aloud(args.text, &args.player, config).await;
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("read-aloud failed: {error:#}");
+            notify_read_aloud_failure(&notifier, &error);
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn read_aloud(
+    text: Option<String>,
+    player: &str,
+    config: speaches_scribe::config::TtsConfig,
+) -> anyhow::Result<()> {
+    let text = match text {
+        Some(text) => normalize_read_aloud_text(&text).context("--text is empty")?,
+        None => selected_or_clipboard_text().await?,
+    };
+    let options = SpeechOptions {
+        model: config.model,
+        voice: config.voice,
+        response_format: config.response_format.clone(),
+    };
+    let audio = synthesize_speech(&config.base_url, &text, &options).await?;
+    let audio_path = write_speech_temp_file(&audio, &config.response_format).await?;
+    let play_result = play_audio_file(&audio_path, player).await;
+    if let Err(error) = tokio::fs::remove_file(&audio_path).await {
+        eprintln!(
+            "speaches-scribe failed to remove temporary speech audio {}: {error:#}",
+            audio_path.display()
+        );
+    }
+    play_result
+}
+
+fn notify_read_aloud_failure<N>(notifier: &N, error: &anyhow::Error)
+where
+    N: ErrorNotifier,
+{
+    let body = format!("{error:#}");
+    if let Err(notify_error) = notifier.notify_error(READ_ALOUD_ERROR_SUMMARY, &body) {
+        eprintln!("speaches-scribe notification failed: {notify_error:#}");
+    }
+}
+
+fn env_or(primary: &str, fallback: &str) -> Option<String> {
+    std::env::var(primary)
+        .ok()
+        .or_else(|| std::env::var(fallback).ok())
 }
 
 async fn run_transcribe_command(args: TranscribeArgs) -> ExitCode {
@@ -490,6 +588,35 @@ mod tests {
             "target/speaches-scribe-debug"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn read_aloud_accepts_text_and_tts_options() {
+        match Cli::parse_from([
+            "speaches-scribe",
+            "read-aloud",
+            "--text",
+            "read this",
+            "--model",
+            "tts-1",
+            "--voice",
+            "lessac",
+            "--response-format",
+            "wav",
+            "--player",
+            "pw-play",
+        ])
+        .command
+        {
+            Command::ReadAloud(args) => {
+                assert_eq!(args.text.as_deref(), Some("read this"));
+                assert_eq!(args.model.as_deref(), Some("tts-1"));
+                assert_eq!(args.voice.as_deref(), Some("lessac"));
+                assert_eq!(args.response_format.as_deref(), Some("wav"));
+                assert_eq!(args.player, "pw-play");
+            }
+            _ => panic!("expected read-aloud command"),
+        }
     }
 
     fn parse_daemon_args<const N: usize>(args: [&str; N]) -> DaemonArgs {

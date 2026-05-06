@@ -12,3 +12,4 @@ pub mod shell;
 pub mod streaming;
 pub mod stt;
 pub mod trace;
+pub mod tts;

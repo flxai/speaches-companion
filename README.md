@@ -4,15 +4,16 @@ Linux desktop dictation for Speaches.
 
 `speaches-scribe` is the desktop twin to
 [Speaches](https://github.com/speaches-ai/speaches): Speaches runs the speech
-recognition service, and `speaches-scribe` captures microphone audio, sends it
-to that service, and injects the transcript into the focused X11 window. It is
-not a standalone transcription engine and only works in conjunction with a
-running Speaches-compatible server.
+service, and `speaches-scribe` captures microphone audio, sends it to Speaches
+for STT, injects the transcript into the focused X11 window, and can send
+selected text to Speaches TTS for read-aloud playback. It is not a standalone
+speech engine and only works in conjunction with a running Speaches-compatible
+server.
 
 The Nix flake is the primary interface. It builds the `speaches-scribe` binary,
-wraps it with the required `pw-record` runtime dependency, and exposes the
-daemon, hotkey, smoke-test, injection, and transcription subcommands as flake
-apps.
+wraps it with the required PipeWire and X11 selection helpers, and exposes the
+daemon, hotkey, read-aloud, smoke-test, injection, and transcription subcommands
+as flake apps.
 
 ## Running
 
@@ -33,12 +34,20 @@ nix run .#daemon
 nix run .#smoke -- --record-seconds 2 --response-format text
 nix run .#hotkey -- down
 nix run .#hotkey -- up
+nix run .#read-aloud -- --text "hello from Speaches"
 ```
 
 `speaches-scribe` expects Speaches to be reachable at `SPEACHES_BASE_URL`
 or through `--base-url`. Choose the Speaches model with
 `SPEACHES_SCRIBE_MODEL` or `--model`, and optionally set
 `SPEACHES_SCRIBE_LANGUAGE` or `--language`.
+
+Read-aloud uses Speaches' OpenAI-compatible `/v1/audio/speech` endpoint. Without
+`--text`, it reads the X11 primary selection and falls back to the clipboard,
+then plays the returned audio with `pw-play`. Configure TTS with
+`SPEACHES_SCRIBE_TTS_MODEL`, `SPEACHES_SCRIBE_TTS_VOICE`, and
+`SPEACHES_SCRIBE_TTS_RESPONSE_FORMAT`, or the matching `--model`, `--voice`,
+and `--response-format` flags.
 
 The daemon uses rolling HTTP dictation: while the hotkey is held, audio is
 recorded and partial transcripts are collected. On release, the full recording

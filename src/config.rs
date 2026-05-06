@@ -6,6 +6,9 @@ use url::Url;
 
 pub const DEFAULT_BASE_URL: &str = "http://ono.tail:8000";
 pub const DEFAULT_MODEL: &str = "Systran/faster-whisper-large-v3";
+pub const DEFAULT_TTS_MODEL: &str = "tts-1";
+pub const DEFAULT_TTS_RESPONSE_FORMAT: &str = "wav";
+pub const DEFAULT_TTS_VOICE: &str = "en_US-lessac-medium";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DictateLiveConfig {
@@ -14,6 +17,14 @@ pub struct DictateLiveConfig {
     pub language: Option<String>,
     pub duration_seconds: u64,
     pub trace_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TtsConfig {
+    pub base_url: String,
+    pub model: String,
+    pub voice: String,
+    pub response_format: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -26,6 +37,18 @@ pub struct ConfigInput {
     pub env_base_url: Option<String>,
     pub env_model: Option<String>,
     pub env_language: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TtsConfigInput {
+    pub cli_base_url: Option<String>,
+    pub cli_model: Option<String>,
+    pub cli_voice: Option<String>,
+    pub cli_response_format: Option<String>,
+    pub env_base_url: Option<String>,
+    pub env_model: Option<String>,
+    pub env_voice: Option<String>,
+    pub env_response_format: Option<String>,
 }
 
 pub fn resolve_config(input: ConfigInput) -> DictateLiveConfig {
@@ -44,6 +67,19 @@ pub fn resolve_config(input: ConfigInput) -> DictateLiveConfig {
         language,
         duration_seconds,
         trace_path,
+    }
+}
+
+pub fn resolve_tts_config(input: TtsConfigInput) -> TtsConfig {
+    TtsConfig {
+        base_url: choose(input.cli_base_url, input.env_base_url, DEFAULT_BASE_URL),
+        model: choose(input.cli_model, input.env_model, DEFAULT_TTS_MODEL),
+        voice: choose(input.cli_voice, input.env_voice, DEFAULT_TTS_VOICE),
+        response_format: choose(
+            input.cli_response_format,
+            input.env_response_format,
+            DEFAULT_TTS_RESPONSE_FORMAT,
+        ),
     }
 }
 
