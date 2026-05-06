@@ -28,9 +28,9 @@ is transcribed and injected into the focused X11 window. If focus changes during
 a recording, `trec` stops editing the target window instead of sending
 Backspaces to the wrong place.
 
-Text payloads are injected through the X clipboard and pasted into the target
-window, so punctuation and Unicode do not depend on the active keyboard layout.
-Speculative replacement still uses Backspace for the portion that changed.
+Text payloads are injected through libxdo text entry with active modifiers
+temporarily cleared. Speculative replacement still uses Backspace for the
+portion that changed.
 
 Inline partial injection is available, but should not be used with modifier-held
 i3 bindings such as `$sup+d`: fake typing while Super is physically held can

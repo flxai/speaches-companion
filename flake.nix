@@ -40,7 +40,7 @@
           ];
           postInstall = ''
             wrapProgram "$out/bin/trec" \
-              --prefix PATH : ${lib.makeBinPath [pkgs.pipewire pkgs.xclip]}
+              --prefix PATH : ${lib.makeBinPath [pkgs.pipewire]}
           '';
         });
 
