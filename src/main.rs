@@ -7,7 +7,7 @@ use trec::config::{resolve_config, ConfigInput};
 use trec::daemon::run_daemon;
 use trec::inject::{LibXdoTextInjector, TextInjector};
 use trec::ipc::{default_socket_path, send_command, IpcCommand};
-use trec::notification::{DesktopErrorNotifier, NoopTranscriptNotifier};
+use trec::notification::{NoopErrorNotifier, NoopTranscriptNotifier};
 use trec::phase::PhaseResult;
 use trec::realtime::run_dictate_live;
 use trec::streaming::{RollingHttpTranscriber, StreamingDictationController};
@@ -172,7 +172,7 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
         transcriber,
         injector,
         NoopTranscriptNotifier,
-        DesktopErrorNotifier,
+        NoopErrorNotifier,
     );
 
     eprintln!("trec daemon listening on {}", socket_path.display());
