@@ -8,6 +8,7 @@ pub mod ipc;
 pub mod notification;
 pub mod phase;
 pub mod realtime;
+pub mod shell;
 pub mod streaming;
 pub mod stt;
 pub mod trace;
