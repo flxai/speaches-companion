@@ -12,7 +12,7 @@ use crate::audio::{
     STT_SAMPLE_RATE,
 };
 use crate::daemon::{DaemonResponse, HotkeyHandler};
-use crate::inject::{normalize_transcript_for_injection, TextInjector};
+use crate::inject::{normalize_transcript_for_injection, SpeculativeTextSession, TextInjector};
 use crate::ipc::IpcCommand;
 use crate::notification::{
     dictation_error_body, ErrorNotifier, NoopErrorNotifier, NoopTranscriptNotifier,
@@ -43,26 +43,29 @@ pub trait LiveTranscriber: Send + Sync {
 pub struct StreamingDictationController<L, I, V = NoopTranscriptNotifier, N = NoopErrorNotifier>
 where
     L: LiveTranscriber,
-    I: TextInjector,
+    I: TextInjector + Clone + Send + 'static,
     V: TranscriptNotifier,
-    N: ErrorNotifier,
+    N: ErrorNotifier + Clone + Send + 'static,
 {
     transcriber: L,
     injector: I,
     transcript_notifier: V,
     error_notifier: N,
-    active: Option<ActiveStreamingSession<L::Session>>,
+    active: Option<ActiveStreamingSession<L::Session, I>>,
 }
 
-struct ActiveStreamingSession<S> {
+struct ActiveStreamingSession<S, I>
+where
+    I: TextInjector,
+{
     session: S,
-    partial_task: JoinHandle<Option<String>>,
+    partial_task: JoinHandle<SpeculativeTextSession<I>>,
 }
 
 impl<L, I> StreamingDictationController<L, I>
 where
     L: LiveTranscriber,
-    I: TextInjector,
+    I: TextInjector + Clone + Send + 'static,
 {
     pub fn new(transcriber: L, injector: I) -> Self {
         Self {
@@ -78,9 +81,9 @@ where
 impl<L, I, V, N> StreamingDictationController<L, I, V, N>
 where
     L: LiveTranscriber,
-    I: TextInjector,
+    I: TextInjector + Clone + Send + 'static,
     V: TranscriptNotifier,
-    N: ErrorNotifier,
+    N: ErrorNotifier + Clone + Send + 'static,
 {
     pub fn new_with_notifiers(
         transcriber: L,
@@ -106,9 +109,9 @@ where
 impl<L, I, V, N> HotkeyHandler for StreamingDictationController<L, I, V, N>
 where
     L: LiveTranscriber,
-    I: TextInjector,
+    I: TextInjector + Clone + Send + 'static,
     V: TranscriptNotifier,
-    N: ErrorNotifier,
+    N: ErrorNotifier + Clone + Send + 'static,
 {
     async fn handle_hotkey(&mut self, command: IpcCommand) -> anyhow::Result<DaemonResponse> {
         match command {
@@ -121,15 +124,22 @@ where
 impl<L, I, V, N> StreamingDictationController<L, I, V, N>
 where
     L: LiveTranscriber,
-    I: TextInjector,
+    I: TextInjector + Clone + Send + 'static,
     V: TranscriptNotifier,
-    N: ErrorNotifier,
+    N: ErrorNotifier + Clone + Send + 'static,
 {
     async fn start_streaming(&mut self) -> anyhow::Result<DaemonResponse> {
         if self.active.is_some() {
             return Ok(DaemonResponse::AlreadyRecording);
         }
 
+        let text_session = match SpeculativeTextSession::start(self.injector.clone()) {
+            Ok(session) => session,
+            Err(error) => {
+                self.notify_failure("Dictation target capture failed", &error);
+                return Err(error);
+            }
+        };
         let live_session = match self.transcriber.start().await {
             Ok(session) => session,
             Err(error) => {
@@ -142,6 +152,8 @@ where
         let partial_task = tokio::spawn(consume_live_updates(
             live_session.updates,
             self.transcript_notifier.clone(),
+            self.error_notifier.clone(),
+            text_session,
         ));
         self.active = Some(ActiveStreamingSession {
             session: live_session.session,
@@ -164,18 +176,18 @@ where
                 return Err(error);
             }
         };
-        let last_partial = match active.partial_task.await {
-            Ok(last_partial) => last_partial,
+        let mut text_session = match active.partial_task.await {
+            Ok(text_session) => text_session,
             Err(error) => {
-                eprintln!("trec partial transcript task failed: {error:#}");
-                None
+                let error = anyhow::anyhow!("partial transcript task failed: {error:#}");
+                self.notify_failure("Partial text replacement failed", &error);
+                return Err(error);
             }
         };
 
-        let text = normalize_transcript_for_injection(&final_transcript).or(last_partial);
-        if let Some(text) = text {
-            if let Err(error) = self.injector.inject_text(&text) {
-                self.notify_failure("Text injection failed", &error);
+        if let Some(text) = normalize_transcript_for_injection(&final_transcript) {
+            if let Err(error) = text_session.replace_text(&text) {
+                self.notify_failure("Final text replacement failed", &error);
                 return Err(error);
             }
             self.notify_transcript(|notifier| notifier.notify_final(&text));
@@ -185,13 +197,7 @@ where
     }
 
     fn notify_failure(&self, stage: &str, error: &anyhow::Error) {
-        let body = dictation_error_body(stage, error);
-        if let Err(notify_error) = self
-            .error_notifier
-            .notify_error(DICTATION_ERROR_SUMMARY, &body)
-        {
-            eprintln!("trec notification failed: {notify_error:#}");
-        }
+        notify_failure(&self.error_notifier, stage, error);
     }
 
     fn notify_transcript(&self, notify: impl FnOnce(&V) -> anyhow::Result<()>) {
@@ -201,24 +207,45 @@ where
     }
 }
 
-async fn consume_live_updates<V>(
+async fn consume_live_updates<I, V, N>(
     mut updates: mpsc::Receiver<LiveTranscriptUpdate>,
     notifier: V,
-) -> Option<String>
+    error_notifier: N,
+    mut text_session: SpeculativeTextSession<I>,
+) -> SpeculativeTextSession<I>
 where
+    I: TextInjector,
     V: TranscriptNotifier,
+    N: ErrorNotifier,
 {
-    let mut last_partial = None;
     while let Some(update) = updates.recv().await {
         let Some(transcript) = normalize_transcript_for_injection(&update.transcript) else {
             continue;
         };
-        if let Err(error) = notifier.notify_partial(&transcript) {
-            eprintln!("trec partial transcript notification failed: {error:#}");
+        match text_session.replace_text(&transcript) {
+            Ok(true) => {
+                if let Err(error) = notifier.notify_partial(&transcript) {
+                    eprintln!("trec partial transcript notification failed: {error:#}");
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                notify_failure(&error_notifier, "Partial text replacement failed", &error);
+                break;
+            }
         }
-        last_partial = Some(transcript);
     }
-    last_partial
+    text_session
+}
+
+fn notify_failure<N>(notifier: &N, stage: &str, error: &anyhow::Error)
+where
+    N: ErrorNotifier,
+{
+    let body = dictation_error_body(stage, error);
+    if let Err(notify_error) = notifier.notify_error(DICTATION_ERROR_SUMMARY, &body) {
+        eprintln!("trec notification failed: {notify_error:#}");
+    }
 }
 
 #[derive(Debug, Clone)]

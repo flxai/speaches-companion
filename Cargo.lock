@@ -2136,6 +2136,7 @@ dependencies = [
  "futures-util",
  "httpmock",
  "libxdo",
+ "libxdo-sys",
  "notify-rust",
  "reqwest",
  "serde",

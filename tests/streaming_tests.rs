@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use trec::daemon::{DaemonResponse, HotkeyHandler};
-use trec::inject::TextInjector;
+use trec::inject::{FocusedWindow, TextInjector};
 use trec::ipc::IpcCommand;
 use trec::notification::{ErrorNotifier, TranscriptNotifier, DICTATION_ERROR_SUMMARY};
 use trec::streaming::{
@@ -16,7 +16,7 @@ async fn streaming_hotkey_injects_final_text_and_reports_partials() {
     let starts = transcriber.starts.clone();
     let stops = transcriber.stops.clone();
     let injector = FakeInjector::default();
-    let injected = injector.injected.clone();
+    let operations = injector.operations.clone();
     let transcript_notifier = FakeTranscriptNotifier::default();
     let transcript_events = transcript_notifier.events.clone();
     let mut controller = StreamingDictationController::new_with_notifiers(
@@ -45,7 +45,16 @@ async fn streaming_hotkey_injects_final_text_and_reports_partials() {
     assert!(!controller.is_recording());
     assert_eq!(*starts.lock().unwrap(), 1);
     assert_eq!(*stops.lock().unwrap(), 1);
-    assert_eq!(*injected.lock().unwrap(), vec!["hello window".to_string()]);
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            InjectOperation::Type("hel".to_string()),
+            InjectOperation::Backspace(3),
+            InjectOperation::Type("hello win".to_string()),
+            InjectOperation::Backspace(9),
+            InjectOperation::Type("hello window".to_string()),
+        ]
+    );
     assert_eq!(
         *transcript_events.lock().unwrap(),
         vec![
@@ -61,7 +70,7 @@ async fn streaming_hotkey_injects_final_text_and_reports_partials() {
 async fn streaming_uses_last_partial_when_final_is_empty() {
     let transcriber = FakeLiveTranscriber::new(["fallback text"], Ok(" \n".to_string()));
     let injector = FakeInjector::default();
-    let injected = injector.injected.clone();
+    let operations = injector.operations.clone();
     let mut controller = StreamingDictationController::new_with_notifiers(
         transcriber,
         injector,
@@ -78,14 +87,17 @@ async fn streaming_uses_last_partial_when_final_is_empty() {
         .await
         .unwrap();
 
-    assert_eq!(*injected.lock().unwrap(), vec!["fallback text".to_string()]);
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![InjectOperation::Type("fallback text".to_string())]
+    );
 }
 
 #[tokio::test]
-async fn streaming_stop_error_notifies_and_does_not_inject() {
+async fn streaming_stop_error_keeps_speculative_partial_and_notifies() {
     let transcriber = FakeLiveTranscriber::new(["partial"], Err("connection refused".to_string()));
     let injector = FakeInjector::default();
-    let injected = injector.injected.clone();
+    let operations = injector.operations.clone();
     let error_notifier = FakeErrorNotifier::default();
     let errors = error_notifier.errors.clone();
     let mut controller = StreamingDictationController::new_with_notifiers(
@@ -99,6 +111,7 @@ async fn streaming_stop_error_notifies_and_does_not_inject() {
         .handle_hotkey(IpcCommand::HotkeyDown)
         .await
         .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let error = controller
         .handle_hotkey(IpcCommand::HotkeyUp)
         .await
@@ -106,13 +119,90 @@ async fn streaming_stop_error_notifies_and_does_not_inject() {
 
     assert!(!controller.is_recording());
     assert!(error.to_string().contains("connection refused"));
-    assert!(injected.lock().unwrap().is_empty());
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![InjectOperation::Type("partial".to_string())]
+    );
     assert_eq!(
         *errors.lock().unwrap(),
         vec![(
             DICTATION_ERROR_SUMMARY.to_string(),
             "Streaming transcription failed: connection refused".to_string()
         )]
+    );
+}
+
+#[tokio::test]
+async fn streaming_aborts_final_replacement_when_focus_changes() {
+    let transcriber = FakeLiveTranscriber::new(Vec::<String>::new(), Ok("hello".to_string()));
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let current_window = injector.current_window.clone();
+    let error_notifier = FakeErrorNotifier::default();
+    let errors = error_notifier.errors.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        error_notifier,
+    );
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    *current_window.lock().unwrap() = Some(FocusedWindow(2));
+    let error = controller
+        .handle_hotkey(IpcCommand::HotkeyUp)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("focused X11 window changed"));
+    assert!(operations.lock().unwrap().is_empty());
+    assert_eq!(
+        *errors.lock().unwrap(),
+        vec![(
+            DICTATION_ERROR_SUMMARY.to_string(),
+            "Final text replacement failed: focused X11 window changed from 1 to 2; aborting replacement".to_string()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn duplicate_streaming_partials_are_ignored() {
+    let transcriber =
+        FakeLiveTranscriber::new(["hello", "hello", "hello"], Ok("hello".to_string()));
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let transcript_notifier = FakeTranscriptNotifier::default();
+    let transcript_events = transcript_notifier.events.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        transcript_notifier,
+        FakeErrorNotifier::default(),
+    );
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    controller
+        .handle_hotkey(IpcCommand::HotkeyUp)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![InjectOperation::Type("hello".to_string())]
+    );
+    assert_eq!(
+        *transcript_events.lock().unwrap(),
+        vec![
+            TranscriptNotice::Listening,
+            TranscriptNotice::Partial("hello".to_string()),
+            TranscriptNotice::Final("hello".to_string()),
+        ]
     );
 }
 
@@ -193,15 +283,48 @@ impl LiveTranscriber for FakeLiveTranscriber {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InjectOperation {
+    Type(String),
+    Backspace(usize),
+}
+
+#[derive(Clone)]
 struct FakeInjector {
-    injected: Arc<Mutex<Vec<String>>>,
+    operations: Arc<Mutex<Vec<InjectOperation>>>,
+    current_window: Arc<Mutex<Option<FocusedWindow>>>,
+}
+
+impl Default for FakeInjector {
+    fn default() -> Self {
+        Self {
+            operations: Arc::new(Mutex::new(Vec::new())),
+            current_window: Arc::new(Mutex::new(Some(FocusedWindow(1)))),
+        }
+    }
 }
 
 impl TextInjector for FakeInjector {
     fn inject_text(&self, text: &str) -> anyhow::Result<()> {
-        self.injected.lock().unwrap().push(text.to_string());
+        self.operations
+            .lock()
+            .unwrap()
+            .push(InjectOperation::Type(text.to_string()));
         Ok(())
+    }
+
+    fn erase_chars(&self, count: usize) -> anyhow::Result<()> {
+        if count > 0 {
+            self.operations
+                .lock()
+                .unwrap()
+                .push(InjectOperation::Backspace(count));
+        }
+        Ok(())
+    }
+
+    fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
+        Ok(*self.current_window.lock().unwrap())
     }
 }
 
