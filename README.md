@@ -29,24 +29,24 @@ a recording, `trec` stops editing the target window instead of sending
 Backspaces to the wrong place.
 
 Text payloads are injected through libxdo text entry with active modifiers
-temporarily cleared. Speculative replacement still uses Backspace for the
-portion that changed.
+temporarily cleared. Speculative replacement uses Backspace for the portion that
+changed.
 
-Inline partial injection is available, but should not be used with modifier-held
-i3 bindings such as `$sup+d`: fake typing while Super is physically held can
-trigger window-manager shortcuts. Enable it only for hotkeys that do not leave a
-modifier held during dictation:
+Inline partial injection is enabled by default. If the trigger binding keeps a
+modifier physically held while dictating, such as some i3 `$sup+d` bindings,
+fake typing can trigger window-manager shortcuts. Disable live partial insertion
+for those bindings:
 
 ```sh
-nix run . -- daemon --inline-partials
+nix run . -- daemon --no-inline-partials
 ```
 
-The daemon can insert a provisional listening marker after audio capture starts.
-It is disabled by default:
+The daemon inserts `💬` after audio capture starts, then replaces it with the
+first partial or final text. Override or disable it with:
 
 ```sh
-nix run . -- daemon --listening-marker "💬"
 nix run . -- daemon --listening-marker "..."
+nix run . -- daemon --no-listening-marker
 ```
 
 Partial transcription starts without an artificial minimum recording duration.

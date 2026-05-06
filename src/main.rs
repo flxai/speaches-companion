@@ -17,6 +17,8 @@ use trec::realtime::run_dictate_live;
 use trec::streaming::{RollingHttpTranscriber, StreamingDictationController};
 use trec::stt::{transcribe_file, ResponseFormat, TranscribeOptions};
 
+const DEFAULT_LISTENING_MARKER: &str = "💬";
+
 #[derive(Debug, Parser)]
 #[command(name = "trec", about = "Linux realtime dictation spike")]
 struct Cli {
@@ -52,8 +54,10 @@ struct DaemonArgs {
     listening_marker: Option<String>,
     #[arg(long)]
     no_listening_marker: bool,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "no_inline_partials")]
     inline_partials: bool,
+    #[arg(long)]
+    no_inline_partials: bool,
     #[arg(long, default_value = "1250")]
     partial_interval_ms: u64,
     #[arg(long, default_value = "0")]
@@ -153,6 +157,8 @@ async fn main() -> ExitCode {
 }
 
 async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
+    let listening_marker = resolve_listening_marker(&args);
+    let inline_partials = resolve_inline_partials(&args);
     let socket_path = args.socket_path.unwrap_or_else(default_socket_path);
     if let Some(record_dir) = args.record_dir {
         eprintln!(
@@ -186,11 +192,6 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     .with_partial_interval(Duration::from_millis(args.partial_interval_ms))
     .with_partial_min_duration(Duration::from_millis(args.partial_min_duration_ms))
     .with_leading_silence(Duration::from_millis(args.leading_silence_ms));
-    let listening_marker = if args.no_listening_marker {
-        None
-    } else {
-        args.listening_marker
-    };
     let injector = LibXdoTextInjector::default();
     let controller = StreamingDictationController::new_with_notifiers(
         transcriber,
@@ -199,7 +200,7 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
         NoopErrorNotifier,
     )
     .with_listening_marker(listening_marker)
-    .with_inline_partials(args.inline_partials);
+    .with_inline_partials(inline_partials);
 
     eprintln!("trec daemon listening on {}", socket_path.display());
     match run_daemon(&socket_path, controller).await {
@@ -209,6 +210,22 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn resolve_listening_marker(args: &DaemonArgs) -> Option<String> {
+    if args.no_listening_marker {
+        None
+    } else {
+        Some(
+            args.listening_marker
+                .clone()
+                .unwrap_or_else(|| DEFAULT_LISTENING_MARKER.to_string()),
+        )
+    }
+}
+
+fn resolve_inline_partials(args: &DaemonArgs) -> bool {
+    args.inline_partials || !args.no_inline_partials
 }
 
 async fn run_hotkey_command(args: HotkeyArgs) -> ExitCode {
@@ -387,6 +404,41 @@ mod tests {
         assert!(notifications[0]
             .1
             .contains(&socket_path.display().to_string()));
+    }
+
+    #[test]
+    fn daemon_defaults_insert_marker_and_live_partials() {
+        let args = parse_daemon_args(["trec", "daemon"]);
+
+        assert_eq!(
+            resolve_listening_marker(&args),
+            Some(DEFAULT_LISTENING_MARKER.to_string())
+        );
+        assert!(resolve_inline_partials(&args));
+    }
+
+    #[test]
+    fn daemon_flags_can_disable_marker_and_live_partials() {
+        let args = parse_daemon_args(["trec", "daemon", "--no-listening-marker"]);
+        assert_eq!(resolve_listening_marker(&args), None);
+
+        let args = parse_daemon_args(["trec", "daemon", "--no-inline-partials"]);
+        assert!(!resolve_inline_partials(&args));
+    }
+
+    #[test]
+    fn daemon_accepts_custom_listening_marker() {
+        let args = parse_daemon_args(["trec", "daemon", "--listening-marker", "..."]);
+
+        assert_eq!(resolve_listening_marker(&args), Some("...".to_string()));
+        assert!(resolve_inline_partials(&args));
+    }
+
+    fn parse_daemon_args<const N: usize>(args: [&str; N]) -> DaemonArgs {
+        match Cli::parse_from(args).command {
+            Command::Daemon(args) => args,
+            _ => panic!("expected daemon command"),
+        }
     }
 
     #[derive(Clone, Default)]
