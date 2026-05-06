@@ -18,6 +18,12 @@ async fn trace_writer_preserves_jsonl_order() {
     let contents = tokio::fs::read_to_string(path).await.expect("read trace");
     let lines = contents.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 2);
-    assert!(lines[0].contains("session.created"));
-    assert!(lines[1].contains("hello"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(lines[0]).expect("first trace event"),
+        json!({"type": "session.created"})
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(lines[1]).expect("second trace event"),
+        json!({"type": "conversation.item.input_audio_transcription.delta", "delta": "hello"})
+    );
 }
