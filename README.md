@@ -50,10 +50,13 @@ nix run . -- daemon --listening-marker "..."
 ```
 
 Partial transcription starts without an artificial minimum recording duration.
-Tune the rolling request cadence if needed:
+Final and partial STT requests include a short leading silence pad so immediate
+speech is less likely to be clipped by the recognizer. Tune the rolling request
+cadence and pad if needed:
 
 ```sh
 nix run . -- daemon --partial-interval-ms 750 --partial-min-duration-ms 0
+nix run . -- daemon --leading-silence-ms 400
 ```
 
 Speaches SSE transcription responses can be tested with:

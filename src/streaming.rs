@@ -158,17 +158,18 @@ where
             return Ok(DaemonResponse::AlreadyRecording);
         }
 
-        let mut text_session = match SpeculativeTextSession::start(self.injector.clone()) {
-            Ok(session) => session,
-            Err(error) => {
-                self.notify_failure("Dictation target capture failed", &error);
-                return Err(error);
-            }
-        };
         let live_session = match self.transcriber.start().await {
             Ok(session) => session,
             Err(error) => {
                 self.notify_failure("Streaming start failed", &error);
+                return Err(error);
+            }
+        };
+        let mut text_session = match SpeculativeTextSession::start(self.injector.clone()) {
+            Ok(session) => session,
+            Err(error) => {
+                let _ = self.transcriber.stop(live_session.session).await;
+                self.notify_failure("Dictation target capture failed", &error);
                 return Err(error);
             }
         };
@@ -327,6 +328,7 @@ pub struct RollingHttpTranscriber {
     options: TranscribeOptions,
     partial_interval: Duration,
     partial_min_duration: Duration,
+    leading_silence: Duration,
     sample_rate: u32,
 }
 
@@ -337,6 +339,7 @@ impl RollingHttpTranscriber {
             options,
             partial_interval: Duration::from_millis(1_250),
             partial_min_duration: Duration::ZERO,
+            leading_silence: Duration::from_millis(250),
             sample_rate: STT_SAMPLE_RATE,
         }
     }
@@ -348,6 +351,11 @@ impl RollingHttpTranscriber {
 
     pub fn with_partial_min_duration(mut self, duration: Duration) -> Self {
         self.partial_min_duration = duration;
+        self
+    }
+
+    pub fn with_leading_silence(mut self, duration: Duration) -> Self {
+        self.leading_silence = duration;
         self
     }
 }
@@ -376,6 +384,7 @@ impl LiveTranscriber for RollingHttpTranscriber {
             sample_rate: self.sample_rate,
             interval: self.partial_interval,
             min_duration: self.partial_min_duration,
+            leading_silence: self.leading_silence,
         }));
 
         Ok(LiveTranscriptionSession {
@@ -399,6 +408,7 @@ impl LiveTranscriber for RollingHttpTranscriber {
             self.sample_rate,
             &pcm,
             "final",
+            self.leading_silence,
         )
         .await
     }
@@ -413,6 +423,7 @@ struct PartialTranscriptionLoop {
     sample_rate: u32,
     interval: Duration,
     min_duration: Duration,
+    leading_silence: Duration,
 }
 
 async fn run_partial_transcriptions(loop_config: PartialTranscriptionLoop) {
@@ -425,6 +436,7 @@ async fn run_partial_transcriptions(loop_config: PartialTranscriptionLoop) {
         sample_rate,
         interval,
         min_duration,
+        leading_silence,
     } = loop_config;
     let min_bytes = pcm_bytes_for_duration(sample_rate, min_duration);
     let mut ticker = tokio::time::interval(interval);
@@ -449,6 +461,7 @@ async fn run_partial_transcriptions(loop_config: PartialTranscriptionLoop) {
                     sample_rate,
                     &pcm,
                     "partial",
+                    leading_silence,
                     &mut stop_rx,
                 ).await {
                     Ok(Some(transcript)) => {
@@ -477,10 +490,12 @@ async fn transcribe_pcm_snapshot_until_stop(
     sample_rate: u32,
     pcm: &[u8],
     label: &str,
+    leading_silence: Duration,
     stop_rx: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<Option<String>> {
     let path = temp_audio_path(label);
-    write_pcm_wav(&path, pcm, sample_rate).await?;
+    let pcm = pcm_with_leading_silence(sample_rate, leading_silence, pcm);
+    write_pcm_wav(&path, &pcm, sample_rate).await?;
     let snapshot_result = {
         let transcribe = transcribe_file(base_url, &path, options);
         tokio::pin!(transcribe);
@@ -521,9 +536,11 @@ async fn transcribe_pcm_snapshot(
     sample_rate: u32,
     pcm: &[u8],
     label: &str,
+    leading_silence: Duration,
 ) -> anyhow::Result<String> {
     let path = temp_audio_path(label);
-    write_pcm_wav(&path, pcm, sample_rate).await?;
+    let pcm = pcm_with_leading_silence(sample_rate, leading_silence, pcm);
+    write_pcm_wav(&path, &pcm, sample_rate).await?;
     let result = transcribe_file(base_url, &path, options).await;
     let cleanup_result = tokio::fs::remove_file(&path)
         .await
@@ -634,6 +651,13 @@ fn pcm_bytes_for_duration(sample_rate: u32, duration: Duration) -> usize {
     samples.ceil() as usize * 2
 }
 
+fn pcm_with_leading_silence(sample_rate: u32, duration: Duration, pcm: &[u8]) -> Vec<u8> {
+    let silence_bytes = pcm_bytes_for_duration(sample_rate, duration);
+    let mut padded_pcm = vec![0; silence_bytes];
+    padded_pcm.extend_from_slice(pcm);
+    padded_pcm
+}
+
 fn pcm_duration(sample_rate: u32, byte_len: usize) -> Duration {
     let samples = byte_len / 2;
     Duration::from_secs_f64(samples as f64 / f64::from(sample_rate))
@@ -677,6 +701,18 @@ mod tests {
         assert_eq!(
             stabilizer.observe(Duration::from_millis(200), "hello world again"),
             Some("hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn leading_silence_prepends_zeroed_pcm_samples() {
+        assert_eq!(
+            pcm_with_leading_silence(4, Duration::from_millis(250), &[1, 2, 3, 4]),
+            vec![0, 0, 1, 2, 3, 4]
+        );
+        assert_eq!(
+            pcm_with_leading_silence(4, Duration::ZERO, &[1, 2]),
+            vec![1, 2]
         );
     }
 

@@ -58,6 +58,8 @@ struct DaemonArgs {
     partial_interval_ms: u64,
     #[arg(long, default_value = "0")]
     partial_min_duration_ms: u64,
+    #[arg(long, default_value = "250")]
+    leading_silence_ms: u64,
 }
 
 #[derive(Debug, Args)]
@@ -182,7 +184,8 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
         },
     )
     .with_partial_interval(Duration::from_millis(args.partial_interval_ms))
-    .with_partial_min_duration(Duration::from_millis(args.partial_min_duration_ms));
+    .with_partial_min_duration(Duration::from_millis(args.partial_min_duration_ms))
+    .with_leading_silence(Duration::from_millis(args.leading_silence_ms));
     let listening_marker = if args.no_listening_marker {
         None
     } else {

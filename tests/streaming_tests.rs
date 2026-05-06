@@ -354,8 +354,66 @@ async fn repeated_streaming_down_does_not_start_second_session() {
     assert_eq!(*starts.lock().unwrap(), 1);
 }
 
+#[tokio::test]
+async fn streaming_starts_audio_capture_before_target_snapshot() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let transcriber = OrderingTranscriber {
+        events: events.clone(),
+    };
+    let injector = OrderingInjector {
+        events: events.clone(),
+    };
+    let mut controller = StreamingDictationController::new(transcriber, injector);
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+
+    assert_eq!(*events.lock().unwrap(), vec!["start", "focus"]);
+}
+
 #[derive(Clone)]
 struct FakeSession;
+
+#[derive(Clone)]
+struct OrderingTranscriber {
+    events: Arc<Mutex<Vec<&'static str>>>,
+}
+
+#[async_trait]
+impl LiveTranscriber for OrderingTranscriber {
+    type Session = FakeSession;
+
+    async fn start(&self) -> anyhow::Result<LiveTranscriptionSession<Self::Session>> {
+        self.events.lock().unwrap().push("start");
+        let (_updates_tx, updates_rx) = tokio::sync::mpsc::channel(8);
+        Ok(LiveTranscriptionSession {
+            session: FakeSession,
+            updates: updates_rx,
+        })
+    }
+
+    async fn stop(&self, _session: Self::Session) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+}
+
+#[derive(Clone)]
+struct OrderingInjector {
+    events: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl TextInjector for OrderingInjector {
+    fn inject_text(&self, _text: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
+        self.events.lock().unwrap().push("focus");
+        Ok(Some(FocusedWindow(1)))
+    }
+}
 
 #[derive(Clone)]
 struct FakeLiveTranscriber {
