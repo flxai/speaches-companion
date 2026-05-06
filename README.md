@@ -22,20 +22,27 @@ nix run .#hotkey -- down
 nix run .#hotkey -- up
 ```
 
-The daemon uses rolling HTTP dictation: while the hotkey is held, partial
-transcripts are typed speculatively into the focused X11 window and replaced as
-better candidates arrive. On release, the full recording is transcribed and the
-speculative text is replaced with the final transcript. If focus changes during a
-recording, `trec` stops editing the target window instead of sending Backspaces
-to the wrong place.
+The daemon uses rolling HTTP dictation: while the hotkey is held, audio is
+recorded and partial transcripts are collected. On release, the full recording
+is transcribed and injected into the focused X11 window. If focus changes during
+a recording, `trec` stops editing the target window instead of sending
+Backspaces to the wrong place.
 
-By default, the daemon inserts `💬` after audio capture starts, so it doubles as
-the "safe to speak" cue and is replaced by partial/final text. Override or
-disable it with:
+Inline partial injection is available, but should not be used with modifier-held
+i3 bindings such as `$sup+d`: fake typing while Super is physically held can
+trigger window-manager shortcuts. Enable it only for hotkeys that do not leave a
+modifier held during dictation:
 
 ```sh
+nix run . -- daemon --inline-partials
+```
+
+The daemon can insert a provisional listening marker after audio capture starts.
+It is disabled by default:
+
+```sh
+nix run . -- daemon --listening-marker "💬"
 nix run . -- daemon --listening-marker "..."
-nix run . -- daemon --no-listening-marker
 ```
 
 Partial transcription starts without an artificial minimum recording duration.

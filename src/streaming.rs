@@ -52,6 +52,7 @@ where
     transcript_notifier: V,
     error_notifier: N,
     listening_marker: Option<String>,
+    inline_partials: bool,
     active: Option<ActiveStreamingSession<L::Session, I>>,
 }
 
@@ -60,7 +61,15 @@ where
     I: TextInjector,
 {
     session: S,
-    partial_task: JoinHandle<SpeculativeTextSession<I>>,
+    partial_task: JoinHandle<PartialTextSession<I>>,
+}
+
+struct PartialTextSession<I>
+where
+    I: TextInjector,
+{
+    text_session: SpeculativeTextSession<I>,
+    latest_partial: Option<String>,
 }
 
 impl<L, I> StreamingDictationController<L, I>
@@ -75,6 +84,7 @@ where
             transcript_notifier: NoopTranscriptNotifier,
             error_notifier: NoopErrorNotifier,
             listening_marker: None,
+            inline_partials: true,
             active: None,
         }
     }
@@ -99,6 +109,7 @@ where
             transcript_notifier,
             error_notifier,
             listening_marker: None,
+            inline_partials: true,
             active: None,
         }
     }
@@ -106,6 +117,11 @@ where
     pub fn with_listening_marker(mut self, marker: Option<String>) -> Self {
         self.listening_marker =
             marker.and_then(|marker| normalize_transcript_for_injection(&marker));
+        self
+    }
+
+    pub fn with_inline_partials(mut self, inline_partials: bool) -> Self {
+        self.inline_partials = inline_partials;
         self
     }
 
@@ -169,6 +185,7 @@ where
             live_session.updates,
             self.error_notifier.clone(),
             text_session,
+            self.inline_partials,
         ));
         self.active = Some(ActiveStreamingSession {
             session: live_session.session,
@@ -186,15 +203,29 @@ where
         let final_transcript = match self.transcriber.stop(active.session).await {
             Ok(transcript) => transcript,
             Err(error) => {
-                active.partial_task.abort();
+                let mut partial_state = match finish_partial_task(active.partial_task).await {
+                    Ok(partial_state) => partial_state,
+                    Err(partial_error) => {
+                        self.notify_failure("Partial text replacement failed", &partial_error);
+                        return Err(partial_error);
+                    }
+                };
+                if let Some(partial) = partial_state.latest_partial.as_deref() {
+                    if let Err(replace_error) = partial_state.text_session.replace_text(partial) {
+                        self.notify_failure("Partial fallback replacement failed", &replace_error);
+                    }
+                } else if !partial_state.text_session.inserted_text().is_empty() {
+                    if let Err(cleanup_error) = partial_state.text_session.replace_text("") {
+                        self.notify_failure("Speculative text cleanup failed", &cleanup_error);
+                    }
+                }
                 self.notify_failure("Streaming transcription failed", &error);
                 return Err(error);
             }
         };
-        let mut text_session = match active.partial_task.await {
-            Ok(text_session) => text_session,
+        let mut partial_state = match finish_partial_task(active.partial_task).await {
+            Ok(partial_state) => partial_state,
             Err(error) => {
-                let error = anyhow::anyhow!("partial transcript task failed: {error:#}");
                 self.notify_failure("Partial text replacement failed", &error);
                 return Err(error);
             }
@@ -202,20 +233,21 @@ where
 
         match normalize_transcript_for_injection(&final_transcript) {
             Some(text) => {
-                if let Err(error) = text_session.replace_text(&text) {
+                if let Err(error) = partial_state.text_session.replace_text(&text) {
                     self.notify_failure("Final text replacement failed", &error);
                     return Err(error);
                 }
                 self.notify_transcript(|notifier| notifier.notify_final(&text));
             }
             None => {
-                if self
-                    .listening_marker
-                    .as_deref()
-                    .is_some_and(|marker| text_session.inserted_text() == marker)
-                {
-                    if let Err(error) = text_session.replace_text("") {
-                        self.notify_failure("Listening marker cleanup failed", &error);
+                if let Some(partial) = partial_state.latest_partial.as_deref() {
+                    if let Err(error) = partial_state.text_session.replace_text(partial) {
+                        self.notify_failure("Partial fallback replacement failed", &error);
+                        return Err(error);
+                    }
+                } else if !partial_state.text_session.inserted_text().is_empty() {
+                    if let Err(error) = partial_state.text_session.replace_text("") {
+                        self.notify_failure("Speculative text cleanup failed", &error);
                         return Err(error);
                     }
                 }
@@ -240,24 +272,43 @@ async fn consume_live_updates<I, N>(
     mut updates: mpsc::Receiver<LiveTranscriptUpdate>,
     error_notifier: N,
     mut text_session: SpeculativeTextSession<I>,
-) -> SpeculativeTextSession<I>
+    inline_partials: bool,
+) -> PartialTextSession<I>
 where
     I: TextInjector,
     N: ErrorNotifier,
 {
+    let mut latest_partial = None;
     while let Some(update) = updates.recv().await {
         let Some(transcript) = normalize_transcript_for_injection(&update.transcript) else {
             continue;
         };
-        match text_session.replace_text(&transcript) {
-            Ok(_) => {}
-            Err(error) => {
-                notify_failure(&error_notifier, "Partial text replacement failed", &error);
-                break;
+        latest_partial = Some(transcript.clone());
+        if inline_partials {
+            match text_session.replace_text(&transcript) {
+                Ok(_) => {}
+                Err(error) => {
+                    notify_failure(&error_notifier, "Partial text replacement failed", &error);
+                    break;
+                }
             }
         }
     }
-    text_session
+    PartialTextSession {
+        text_session,
+        latest_partial,
+    }
+}
+
+async fn finish_partial_task<I>(
+    partial_task: JoinHandle<PartialTextSession<I>>,
+) -> anyhow::Result<PartialTextSession<I>>
+where
+    I: TextInjector,
+{
+    partial_task
+        .await
+        .map_err(|error| anyhow::anyhow!("partial transcript task failed: {error:#}"))
 }
 
 fn notify_failure<N>(notifier: &N, stage: &str, error: &anyhow::Error)

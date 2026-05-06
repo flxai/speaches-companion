@@ -45,10 +45,12 @@ struct DaemonArgs {
     record_dir: Option<PathBuf>,
     #[arg(long)]
     stream_response: bool,
-    #[arg(long, default_value = "💬")]
-    listening_marker: String,
+    #[arg(long)]
+    listening_marker: Option<String>,
     #[arg(long)]
     no_listening_marker: bool,
+    #[arg(long)]
+    inline_partials: bool,
     #[arg(long, default_value = "1250")]
     partial_interval_ms: u64,
     #[arg(long, default_value = "0")]
@@ -181,7 +183,7 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     let listening_marker = if args.no_listening_marker {
         None
     } else {
-        Some(args.listening_marker)
+        args.listening_marker
     };
     let injector = LibXdoTextInjector::default();
     let controller = StreamingDictationController::new_with_notifiers(
@@ -190,7 +192,8 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
         NoopTranscriptNotifier,
         NoopErrorNotifier,
     )
-    .with_listening_marker(listening_marker);
+    .with_listening_marker(listening_marker)
+    .with_inline_partials(args.inline_partials);
 
     eprintln!("trec daemon listening on {}", socket_path.display());
     match run_daemon(&socket_path, controller).await {

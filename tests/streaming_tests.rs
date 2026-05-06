@@ -154,6 +154,37 @@ async fn streaming_uses_last_partial_when_final_is_empty() {
 }
 
 #[tokio::test]
+async fn streaming_can_defer_partial_injection_until_stop() {
+    let transcriber = FakeLiveTranscriber::new(["fallback text"], Ok(" \n".to_string()));
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        FakeErrorNotifier::default(),
+    )
+    .with_inline_partials(false);
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert!(operations.lock().unwrap().is_empty());
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyUp)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![InjectOperation::Type("fallback text".to_string())]
+    );
+}
+
+#[tokio::test]
 async fn streaming_stop_error_keeps_speculative_partial_and_notifies() {
     let transcriber = FakeLiveTranscriber::new(["partial"], Err("connection refused".to_string()));
     let injector = FakeInjector::default();
@@ -189,6 +220,40 @@ async fn streaming_stop_error_keeps_speculative_partial_and_notifies() {
             DICTATION_ERROR_SUMMARY.to_string(),
             "Streaming transcription failed: connection refused".to_string()
         )]
+    );
+}
+
+#[tokio::test]
+async fn streaming_stop_error_cleans_up_marker_when_no_partial_exists() {
+    let transcriber =
+        FakeLiveTranscriber::new(Vec::<String>::new(), Err("connection refused".to_string()));
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let error_notifier = FakeErrorNotifier::default();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        error_notifier,
+    )
+    .with_listening_marker(Some("💬".to_string()));
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    let error = controller
+        .handle_hotkey(IpcCommand::HotkeyUp)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("connection refused"));
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            InjectOperation::Type("💬".to_string()),
+            InjectOperation::Backspace(1),
+        ]
     );
 }
 
