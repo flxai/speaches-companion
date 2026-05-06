@@ -23,16 +23,13 @@ use crate::stt::{transcribe_file, TranscribeOptions};
 
 static TEMP_AUDIO_COUNTER: AtomicU64 = AtomicU64::new(0);
 const TRANSCRIBER_WARMUP_DURATION: Duration = Duration::from_millis(500);
-const STT_PREROLL_LIMIT: Duration = Duration::from_millis(1_500);
-const TRIM_LEADING_PAD: Duration = Duration::from_millis(150);
+const TRIM_LEADING_PAD: Duration = Duration::from_millis(500);
 const TRIM_TRAILING_PAD: Duration = Duration::from_millis(300);
 const TRIM_ANALYSIS_FRAME: Duration = Duration::from_millis(20);
 const TRIM_MIN_SPEECH: Duration = Duration::from_millis(120);
 const FIXED_SPEECH_RMS_FLOOR: f64 = 700.0;
 const MAX_SPEECH_RMS_FLOOR: f64 = 1_500.0;
 const NOISE_FLOOR_MULTIPLIER: f64 = 4.0;
-const PARTIAL_MAX_AUDIO: Duration = Duration::from_secs(8);
-const PARTIAL_CONTEXT: Duration = Duration::from_millis(500);
 const SEGMENT_READY_SILENCE: Duration = Duration::from_millis(800);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -477,15 +474,11 @@ impl LiveTranscriber for RollingHttpTranscriber {
         drop(session.partial_task);
 
         let raw_pcm = session.session_pcm.snapshot().await;
-        let stt_view_pcm = session
-            .session_pcm
-            .snapshot_with_preroll_limit(self.sample_rate, STT_PREROLL_LIMIT)
-            .await;
         session.session_pcm.finish().await;
         if raw_pcm.is_empty() {
             anyhow::bail!("recording stopped before any audio was captured");
         }
-        let final_audio = build_final_transcription_audio(self.sample_rate, &stt_view_pcm);
+        let final_audio = build_final_transcription_audio(self.sample_rate, &raw_pcm);
         eprintln!(
             "speaches-scribe final audio snapshot: {:.2}s raw including up to {}ms debug pre-roll",
             pcm_duration(self.sample_rate, raw_pcm.len()).as_secs_f64(),
@@ -633,9 +626,7 @@ async fn run_partial_transcriptions(loop_config: PartialTranscriptionLoop) {
                 }
             }
             _ = ticker.tick() => {
-                let pcm = session_pcm
-                    .snapshot_with_preroll_limit(sample_rate, STT_PREROLL_LIMIT)
-                    .await;
+                let pcm = session_pcm.snapshot().await;
                 let Some(request) = build_partial_transcription_request(
                     sample_rate,
                     &pcm,
@@ -842,14 +833,12 @@ fn build_partial_transcription_request(
         return None;
     }
 
-    let (pcm, additional_leading_trim) = cap_partial_pcm(sample_rate, trim.pcm);
-    let leading_trim = trim.leading_trim + additional_leading_trim;
-    let audio_duration = pcm_duration(sample_rate, pcm.len());
+    let audio_duration = pcm_duration(sample_rate, trim.pcm.len());
     Some(PartialTranscriptionRequest {
         request_id,
-        pcm,
+        pcm: trim.pcm,
         audio_duration,
-        leading_trim,
+        leading_trim: trim.leading_trim,
         trailing_trim: trim.trailing_trim,
         trailing_silence: trim.trailing_silence,
     })
@@ -907,19 +896,6 @@ fn trim_pcm_to_speech(sample_rate: u32, pcm: &[u8]) -> SpeechTrim {
         trailing_silence: pcm_duration(sample_rate, pcm.len().saturating_sub(speech_end)),
         detected_speech: true,
     }
-}
-
-fn cap_partial_pcm(sample_rate: u32, pcm: Vec<u8>) -> (Vec<u8>, Duration) {
-    let retain_bytes = pcm_bytes_for_duration(sample_rate, PARTIAL_MAX_AUDIO + PARTIAL_CONTEXT);
-    let trim_bytes = pcm.len().saturating_sub(retain_bytes);
-    if trim_bytes == 0 {
-        return (pcm, Duration::ZERO);
-    }
-
-    (
-        pcm[trim_bytes..].to_vec(),
-        pcm_duration(sample_rate, trim_bytes),
-    )
 }
 
 fn rms_frames(sample_rate: u32, pcm: &[u8]) -> Vec<RmsFrame> {
@@ -1135,11 +1111,11 @@ mod tests {
         let trim = trim_pcm_to_speech(sample_rate, &pcm);
 
         assert!(trim.detected_speech);
-        assert_eq!(trim.leading_trim, Duration::from_millis(850));
+        assert_eq!(trim.leading_trim, Duration::from_millis(500));
         assert_eq!(trim.trailing_trim, Duration::from_millis(700));
         assert_eq!(
             pcm_duration(sample_rate, trim.pcm.len()),
-            Duration::from_millis(950)
+            Duration::from_millis(1_300)
         );
     }
 
@@ -1190,15 +1166,15 @@ mod tests {
     }
 
     #[test]
-    fn partial_transcription_request_is_bounded_to_recent_active_audio() {
+    fn partial_transcription_request_preserves_full_active_audio() {
         let sample_rate = 1_000;
         let pcm = pcm_for_duration(sample_rate, Duration::from_secs(10), 2_000);
 
         let request = build_partial_transcription_request(sample_rate, &pcm, 0, 7).unwrap();
 
         assert_eq!(request.request_id, 7);
-        assert_eq!(request.audio_duration, Duration::from_millis(8_500));
-        assert_eq!(request.leading_trim, Duration::from_millis(1_500));
+        assert_eq!(request.audio_duration, Duration::from_secs(10));
+        assert_eq!(request.leading_trim, Duration::ZERO);
     }
 
     #[test]
