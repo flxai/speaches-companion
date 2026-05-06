@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build and publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Run checks
+        run: nix flake check --print-build-logs
+
+      - name: Build release artifacts
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+          system="x86_64-linux"
+          artifact="trec-${tag}-${system}"
+
+          nix build ".#packages.${system}.trec" --print-build-logs
+          store_path="$(readlink -f result)"
+
+          mkdir -p dist release-work/package
+          cp -aL result/. release-work/package/
+          tar -C release-work/package -czf "dist/${artifact}-package.tar.gz" .
+
+          nix-store --query --requisites "$store_path" >"dist/${artifact}-closure-paths.txt"
+          printf '%s\n' "$store_path" >"dist/${artifact}-store-path.txt"
+          nix-store --export $(cat "dist/${artifact}-closure-paths.txt") \
+            | gzip -9 >"dist/${artifact}-nix-store-closure.nar.gz"
+
+          cat >"dist/${artifact}-install.txt" <<EOF
+          trec ${tag} (${system})
+
+          Regular Nix install:
+            nix profile install "github:${GITHUB_REPOSITORY}/${tag}"
+
+          Import the attached Nix store closure:
+            gzip -dc "${artifact}-nix-store-closure.nar.gz" | nix-store --import
+            "\$(cat ${artifact}-store-path.txt)/bin/trec" --help
+
+          The package tarball contains only the package output. It is useful for inspection,
+          but the binary expects its Nix store runtime closure to be present.
+          EOF
+
+          (cd dist && sha256sum * >SHA256SUMS)
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          make_latest: true
+          files: |
+            dist/*
