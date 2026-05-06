@@ -255,7 +255,7 @@ impl RollingHttpTranscriber {
             base_url,
             options,
             partial_interval: Duration::from_millis(1_250),
-            partial_min_duration: Duration::from_millis(900),
+            partial_min_duration: Duration::from_millis(2_500),
             sample_rate: STT_SAMPLE_RATE,
         }
     }
@@ -338,7 +338,7 @@ async fn run_partial_transcriptions(loop_config: PartialTranscriptionLoop) {
     let min_bytes = pcm_bytes_for_duration(sample_rate, min_duration);
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut last_sent = String::new();
+    let mut stabilizer = PartialTranscriptStabilizer::new(min_duration);
 
     loop {
         tokio::select! {
@@ -364,10 +364,10 @@ async fn run_partial_transcriptions(loop_config: PartialTranscriptionLoop) {
                         let Some(transcript) = normalize_transcript_for_injection(&transcript) else {
                             continue;
                         };
-                        if transcript == last_sent {
+                        let audio_duration = pcm_duration(sample_rate, pcm.len());
+                        let Some(transcript) = stabilizer.observe(audio_duration, &transcript) else {
                             continue;
-                        }
-                        last_sent.clone_from(&transcript);
+                        };
                         if updates_tx.send(LiveTranscriptUpdate { transcript }).await.is_err() {
                             break;
                         }
@@ -452,12 +452,162 @@ async fn transcribe_pcm_snapshot(
     }
 }
 
+#[derive(Debug, Clone)]
+struct PartialTranscriptStabilizer {
+    previous_candidate: Option<String>,
+    last_emitted: String,
+    min_duration: Duration,
+    min_chars: usize,
+}
+
+impl PartialTranscriptStabilizer {
+    fn new(min_duration: Duration) -> Self {
+        Self {
+            previous_candidate: None,
+            last_emitted: String::new(),
+            min_duration,
+            min_chars: 4,
+        }
+    }
+
+    fn observe(&mut self, audio_duration: Duration, candidate: &str) -> Option<String> {
+        if audio_duration < self.min_duration {
+            return None;
+        }
+        let candidate = candidate.trim();
+        if candidate.chars().count() < self.min_chars {
+            return None;
+        }
+
+        let stable = self
+            .previous_candidate
+            .as_deref()
+            .and_then(|previous| common_word_prefix(previous, candidate));
+        self.previous_candidate = Some(candidate.to_string());
+
+        let stable = stable?;
+        if stable.chars().count() < self.min_chars || stable == self.last_emitted {
+            return None;
+        }
+        self.last_emitted.clone_from(&stable);
+        Some(stable)
+    }
+}
+
+fn common_word_prefix(previous: &str, candidate: &str) -> Option<String> {
+    let previous_words = word_spans(previous);
+    let candidate_words = word_spans(candidate);
+    let mut stable_end = 0usize;
+
+    for ((previous_start, previous_end), (candidate_start, candidate_end)) in
+        previous_words.into_iter().zip(candidate_words)
+    {
+        let previous_word = &previous[previous_start..previous_end];
+        let candidate_word = &candidate[candidate_start..candidate_end];
+        if !previous_word.eq_ignore_ascii_case(candidate_word) {
+            break;
+        }
+        stable_end = candidate_end;
+    }
+
+    if stable_end == 0 {
+        None
+    } else {
+        Some(candidate[..stable_end].trim_end().to_string())
+    }
+}
+
+fn word_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+
+    for (index, ch) in text.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(word_start) = start.take() {
+                spans.push((word_start, index));
+            }
+        } else if start.is_none() {
+            start = Some(index);
+        }
+    }
+
+    if let Some(word_start) = start {
+        spans.push((word_start, text.len()));
+    }
+
+    spans
+}
+
 fn pcm_bytes_for_duration(sample_rate: u32, duration: Duration) -> usize {
     let samples = duration.as_secs_f64() * f64::from(sample_rate);
     samples.ceil() as usize * 2
 }
 
+fn pcm_duration(sample_rate: u32, byte_len: usize) -> Duration {
+    let samples = byte_len / 2;
+    Duration::from_secs_f64(samples as f64 / f64::from(sample_rate))
+}
+
 fn temp_audio_path(label: &str) -> PathBuf {
     let counter = TEMP_AUDIO_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("trec-{label}-{}-{counter}.wav", std::process::id()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partials_wait_for_minimum_audio_duration() {
+        let mut stabilizer = PartialTranscriptStabilizer::new(Duration::from_millis(2_500));
+
+        assert_eq!(
+            stabilizer.observe(Duration::from_millis(2_499), "hello world"),
+            None
+        );
+        assert_eq!(
+            stabilizer.observe(Duration::from_millis(2_500), "hello world"),
+            None
+        );
+        assert_eq!(
+            stabilizer.observe(Duration::from_millis(3_750), "hello world again"),
+            Some("hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn partials_emit_only_word_prefixes_seen_twice() {
+        let mut stabilizer = PartialTranscriptStabilizer::new(Duration::from_millis(0));
+
+        assert_eq!(
+            stabilizer.observe(Duration::from_secs(3), "yellow word"),
+            None
+        );
+        assert_eq!(
+            stabilizer.observe(Duration::from_secs(4), "hello world"),
+            None
+        );
+        assert_eq!(
+            stabilizer.observe(Duration::from_secs(5), "hello world today"),
+            Some("hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn partials_do_not_repeat_the_same_stable_prefix() {
+        let mut stabilizer = PartialTranscriptStabilizer::new(Duration::from_millis(0));
+
+        assert_eq!(
+            stabilizer.observe(Duration::from_secs(3), "hello world"),
+            None
+        );
+        assert_eq!(
+            stabilizer.observe(Duration::from_secs(4), "hello world today"),
+            Some("hello world".to_string())
+        );
+        assert_eq!(
+            stabilizer.observe(Duration::from_secs(5), "hello world tomorrow"),
+            None
+        );
+    }
 }
