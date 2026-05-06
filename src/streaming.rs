@@ -440,7 +440,7 @@ impl LiveTranscriber for RollingHttpTranscriber {
     async fn start(&self) -> anyhow::Result<LiveTranscriptionSession<Self::Session>> {
         let shared_pcm = self.ensure_capture_started().await?;
         let session_pcm =
-            StreamingPcmSession::start(shared_pcm, self.sample_rate, self.preroll).await;
+            StreamingPcmSession::start(shared_pcm, self.sample_rate, self.preroll).await?;
         eprintln!(
             "speaches-scribe hotkey-down audio buffer: {:.2}s available; retained {:.2}s pre-roll (requested {}ms)",
             pcm_duration(self.sample_rate, session_pcm.available_at_start_bytes()).as_secs_f64(),

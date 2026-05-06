@@ -103,9 +103,12 @@ pub struct StreamingPcmSession {
 }
 
 impl StreamingPcmSession {
-    pub async fn start(pcm: SharedPcmBuffer, sample_rate: u32, preroll: Duration) -> Self {
+    pub async fn start(pcm: SharedPcmBuffer, sample_rate: u32, preroll: Duration) -> Result<Self> {
         let preroll_bytes = pcm_bytes_for_duration(sample_rate, preroll);
         let mut pcm_buffer = pcm.lock().await;
+        if pcm_buffer.active_sessions > 0 {
+            bail!("a recording is already active");
+        }
         let available_at_start_bytes = pcm_buffer.len();
         let preroll_start = available_at_start_bytes.saturating_sub(preroll_bytes);
         let preroll_pcm = Arc::new(pcm_buffer.pcm[preroll_start..].to_vec());
@@ -113,12 +116,12 @@ impl StreamingPcmSession {
         pcm_buffer.active_sessions += 1;
         drop(pcm_buffer);
 
-        Self {
+        Ok(Self {
             pcm,
             preroll_pcm,
             available_at_start_bytes,
             finished: Arc::new(AtomicBool::new(false)),
-        }
+        })
     }
 
     pub async fn snapshot(&self) -> Vec<u8> {
@@ -493,8 +496,9 @@ mod tests {
             Duration::from_secs(1),
         )));
         pcm.lock().await.append(&[1, 2, 3, 4]);
-        let session =
-            StreamingPcmSession::start(Arc::clone(&pcm), 4, Duration::from_millis(250)).await;
+        let session = StreamingPcmSession::start(Arc::clone(&pcm), 4, Duration::from_millis(250))
+            .await
+            .unwrap();
 
         pcm.lock().await.append(&[5, 6]);
 
@@ -508,7 +512,9 @@ mod tests {
             Duration::from_secs(1),
         )));
         pcm.lock().await.append(&[1, 2, 3, 4, 5, 6, 7, 8]);
-        let session = StreamingPcmSession::start(Arc::clone(&pcm), 4, Duration::from_secs(1)).await;
+        let session = StreamingPcmSession::start(Arc::clone(&pcm), 4, Duration::from_secs(1))
+            .await
+            .unwrap();
 
         pcm.lock().await.append(&[9, 10]);
 
@@ -530,13 +536,40 @@ mod tests {
 
         assert_eq!(pcm.lock().await.pcm.clone(), vec![3, 4]);
 
-        let session =
-            StreamingPcmSession::start(Arc::clone(&pcm), 4, Duration::from_millis(250)).await;
+        let session = StreamingPcmSession::start(Arc::clone(&pcm), 4, Duration::from_millis(250))
+            .await
+            .unwrap();
         pcm.lock().await.append(&[5, 6, 7, 8]);
 
         assert_eq!(session.snapshot().await, vec![3, 4, 5, 6, 7, 8]);
         session.finish().await;
         assert_eq!(pcm.lock().await.pcm.clone(), vec![7, 8]);
+    }
+
+    #[tokio::test]
+    async fn streaming_pcm_session_rejects_overlapping_recordings() {
+        let pcm = Arc::new(Mutex::new(StreamingPcmBuffer::new(
+            4,
+            Duration::from_secs(1),
+        )));
+        pcm.lock().await.append(&[1, 2, 3, 4]);
+        let session = StreamingPcmSession::start(Arc::clone(&pcm), 4, Duration::from_millis(250))
+            .await
+            .unwrap();
+
+        let error =
+            match StreamingPcmSession::start(Arc::clone(&pcm), 4, Duration::from_millis(250)).await
+            {
+                Ok(_) => panic!("overlapping recording should be rejected"),
+                Err(error) => error,
+            };
+
+        assert!(error.to_string().contains("recording is already active"));
+        session.finish().await;
+        let next_session = StreamingPcmSession::start(pcm, 4, Duration::from_millis(250))
+            .await
+            .unwrap();
+        next_session.finish().await;
     }
 
     #[tokio::test]
