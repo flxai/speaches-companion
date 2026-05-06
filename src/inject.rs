@@ -1,6 +1,14 @@
 use std::ffi::CString;
+use std::io::Write;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{bail, Context};
+
+const XCLIP_BINARY: &str = "xclip";
+const PASTE_KEYSEQUENCE: &str = "Shift+Insert";
+const CLIPBOARD_PASTE_SETTLE: Duration = Duration::from_millis(75);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FocusedWindow(pub u64);
@@ -39,22 +47,31 @@ impl TextInjector for LibXdoTextInjector {
         }
 
         let xdo = RawXdo::new()?;
-        xdo.with_cleared_modifiers(|| {
-            let text = CString::new(text).context("text contains an interior NUL byte")?;
-            let code = unsafe {
-                libxdo_sys::xdo_enter_text_window(
-                    xdo.handle,
-                    libxdo_sys::CURRENTWINDOW,
-                    text.as_ptr(),
-                    self.delay_microsecs,
-                )
-            };
-            if code != 0 {
-                bail!("failed to type text through libxdo: error code {code}");
+        let previous_clipboard = read_clipboard();
+
+        set_clipboard(text.as_bytes()).context("failed to stage text in X clipboard")?;
+        let paste_result = xdo
+            .with_cleared_modifiers(|| {
+                xdo.send_keysequence(PASTE_KEYSEQUENCE, self.delay_microsecs)
+                    .context("failed to send paste key sequence")
+            })
+            .context("libxdo clipboard paste failed");
+
+        // Most X clients request CLIPBOARD immediately after the paste key event, but the
+        // request is asynchronous relative to XTest. Keep our temporary owner alive briefly
+        // before restoring the user's clipboard.
+        thread::sleep(CLIPBOARD_PASTE_SETTLE);
+
+        let restore_result = match previous_clipboard {
+            Ok(previous_clipboard) => {
+                set_clipboard(&previous_clipboard).context("failed to restore previous X clipboard")
             }
-            Ok(())
-        })
-        .context("libxdo text injection failed")
+            Err(_) => Ok(()),
+        };
+
+        paste_result?;
+        restore_result?;
+        Ok(())
     }
 
     fn erase_chars(&self, count: usize) -> anyhow::Result<()> {
@@ -193,6 +210,45 @@ impl Drop for RawXdo {
     fn drop(&mut self) {
         unsafe { libxdo_sys::xdo_free(self.handle) };
     }
+}
+
+fn read_clipboard() -> anyhow::Result<Vec<u8>> {
+    let output = Command::new(XCLIP_BINARY)
+        .args(["-selection", "clipboard", "-out"])
+        .output()
+        .context("failed to run xclip to read clipboard")?;
+    if !output.status.success() {
+        bail!(
+            "xclip clipboard read failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output.stdout)
+}
+
+fn set_clipboard(bytes: &[u8]) -> anyhow::Result<()> {
+    let mut child = Command::new(XCLIP_BINARY)
+        .args(["-selection", "clipboard", "-in"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("failed to run xclip to write clipboard")?;
+
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("xclip clipboard writer did not expose stdin")?;
+        stdin
+            .write_all(bytes)
+            .context("failed to write text to xclip")?;
+    }
+
+    let status = child.wait().context("failed to wait for xclip")?;
+    if !status.success() {
+        bail!("xclip clipboard write failed with status {status}");
+    }
+    Ok(())
 }
 
 pub struct SpeculativeTextSession<I>
