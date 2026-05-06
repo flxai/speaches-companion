@@ -16,6 +16,11 @@ pub trait TextInjector: Send + Sync {
         bail!("text injector does not support erasing {count} characters")
     }
 
+    fn replace_tail(&self, erase_count: usize, text_suffix: &str) -> anyhow::Result<()> {
+        self.erase_chars(erase_count)?;
+        self.inject_text(text_suffix)
+    }
+
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
         Ok(None)
     }
@@ -39,22 +44,8 @@ impl TextInjector for LibXdoTextInjector {
         }
 
         let xdo = RawXdo::new()?;
-        xdo.with_cleared_modifiers(|| {
-            let text = CString::new(text).context("text contains an interior NUL byte")?;
-            let code = unsafe {
-                libxdo_sys::xdo_enter_text_window(
-                    xdo.handle,
-                    libxdo_sys::CURRENTWINDOW,
-                    text.as_ptr(),
-                    self.delay_microsecs,
-                )
-            };
-            if code != 0 {
-                bail!("failed to type text through libxdo: error code {code}");
-            }
-            Ok(())
-        })
-        .context("libxdo text injection failed")
+        xdo.with_cleared_modifiers(|| xdo.enter_text(text, self.delay_microsecs))
+            .context("libxdo text injection failed")
     }
 
     fn erase_chars(&self, count: usize) -> anyhow::Result<()> {
@@ -62,14 +53,23 @@ impl TextInjector for LibXdoTextInjector {
             return Ok(());
         }
 
+        self.replace_tail(count, "")
+    }
+
+    fn replace_tail(&self, erase_count: usize, text_suffix: &str) -> anyhow::Result<()> {
+        if erase_count == 0 && text_suffix.is_empty() {
+            return Ok(());
+        }
+
         let xdo = RawXdo::new()?;
         xdo.with_cleared_modifiers(|| {
-            for _ in 0..count {
+            for _ in 0..erase_count {
                 xdo.send_keysequence("BackSpace", self.delay_microsecs)?;
             }
+            xdo.enter_text(text_suffix, self.delay_microsecs)?;
             Ok(())
         })
-        .context("libxdo text erasure failed")
+        .context("libxdo text replacement failed")
     }
 
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
@@ -109,6 +109,26 @@ impl RawXdo {
         };
         if code != 0 {
             bail!("failed to send key sequence through libxdo: error code {code}");
+        }
+        Ok(())
+    }
+
+    fn enter_text(&self, text: &str, delay_microsecs: u32) -> anyhow::Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+
+        let text = CString::new(text).context("text contains an interior NUL byte")?;
+        let code = unsafe {
+            libxdo_sys::xdo_enter_text_window(
+                self.handle,
+                libxdo_sys::CURRENTWINDOW,
+                text.as_ptr(),
+                delay_microsecs,
+            )
+        };
+        if code != 0 {
+            bail!("failed to type text through libxdo: error code {code}");
         }
         Ok(())
     }
@@ -228,8 +248,7 @@ where
         let prefix_bytes = common_prefix_byte_len(&self.inserted_text, text);
         let erase_count = self.inserted_text[prefix_bytes..].chars().count();
         let text_suffix = &text[prefix_bytes..];
-        self.injector.erase_chars(erase_count)?;
-        self.injector.inject_text(text_suffix)?;
+        self.injector.replace_tail(erase_count, text_suffix)?;
         self.inserted_text = text.to_string();
         Ok(true)
     }
@@ -369,6 +388,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn speculative_replacement_uses_single_tail_replacement_call() {
+        let injector = TailReplacingInjector::default();
+        let replacements = injector.replacements.clone();
+        let mut session = SpeculativeTextSession::start(injector).unwrap();
+
+        session.replace_text("💬").unwrap();
+        session.replace_text("hello").unwrap();
+
+        assert_eq!(
+            *replacements.lock().unwrap(),
+            vec![(0, "💬".to_string()), (1, "hello".to_string())]
+        );
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum InjectOperation {
         Type(String),
@@ -398,6 +432,25 @@ mod tests {
                     .unwrap()
                     .push(InjectOperation::Backspace(count));
             }
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct TailReplacingInjector {
+        replacements: Arc<Mutex<Vec<(usize, String)>>>,
+    }
+
+    impl TextInjector for TailReplacingInjector {
+        fn inject_text(&self, text: &str) -> anyhow::Result<()> {
+            self.replace_tail(0, text)
+        }
+
+        fn replace_tail(&self, erase_count: usize, text_suffix: &str) -> anyhow::Result<()> {
+            self.replacements
+                .lock()
+                .unwrap()
+                .push((erase_count, text_suffix.to_string()));
             Ok(())
         }
     }
