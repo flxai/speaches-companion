@@ -42,6 +42,8 @@ struct DaemonArgs {
     language: Option<String>,
     #[arg(long)]
     record_dir: Option<PathBuf>,
+    #[arg(long)]
+    stream_response: bool,
 }
 
 #[derive(Debug, Args)]
@@ -90,6 +92,8 @@ struct TranscribeArgs {
     hotwords: Option<String>,
     #[arg(long)]
     with_timestamps: bool,
+    #[arg(long)]
+    stream: bool,
 }
 
 #[derive(Debug, Args)]
@@ -160,6 +164,7 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
             prompt: None,
             hotwords: None,
             without_timestamps: true,
+            stream: args.stream_response,
         },
     );
     let injector = LibXdoTextInjector::default();
@@ -229,6 +234,7 @@ async fn run_transcribe_command(args: TranscribeArgs) -> ExitCode {
         prompt: args.prompt,
         hotwords: args.hotwords,
         without_timestamps: !args.with_timestamps,
+        stream: args.stream,
     };
 
     match transcribe_file(&config.base_url, &args.audio, &options).await {
@@ -266,6 +272,7 @@ async fn run_smoke_command(args: SmokeArgs) -> ExitCode {
         prompt: None,
         hotwords: None,
         with_timestamps: false,
+        stream: false,
     };
     run_transcribe_command(transcribe_args).await
 }

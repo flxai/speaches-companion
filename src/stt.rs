@@ -3,6 +3,7 @@ use std::path::Path;
 use anyhow::{bail, Context};
 use reqwest::multipart::{Form, Part};
 use reqwest::Url;
+use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseFormat {
@@ -48,6 +49,7 @@ pub struct TranscribeOptions {
     pub prompt: Option<String>,
     pub hotwords: Option<String>,
     pub without_timestamps: bool,
+    pub stream: bool,
 }
 
 pub async fn transcribe_file(
@@ -84,6 +86,9 @@ pub async fn transcribe_file(
     if let Some(hotwords) = options.hotwords.as_deref().and_then(non_empty_str) {
         form = form.text("hotwords", hotwords.to_string());
     }
+    if options.stream {
+        form = form.text("stream", "true");
+    }
 
     let response = reqwest::Client::new()
         .post(url.clone())
@@ -101,7 +106,64 @@ pub async fn transcribe_file(
         bail!("transcription failed with HTTP {status}: {body}");
     }
 
-    Ok(body)
+    if options.stream {
+        parse_streaming_transcript(&body)
+    } else {
+        Ok(body)
+    }
+}
+
+pub fn parse_streaming_transcript(body: &str) -> anyhow::Result<String> {
+    let mut delta_text = String::new();
+    let mut done_text = None;
+
+    for event in sse_data_events(body) {
+        if event.trim() == "[DONE]" {
+            continue;
+        }
+        let event: TranscriptStreamEvent = serde_json::from_str(&event)
+            .with_context(|| format!("invalid transcription SSE event: {event}"))?;
+        match event.event_type.as_str() {
+            "transcript.text.delta" => {
+                if let Some(delta) = event.delta {
+                    delta_text.push_str(&delta);
+                }
+            }
+            "transcript.text.done" => {
+                done_text = event.text;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(done_text
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or(delta_text))
+}
+
+#[derive(Debug, Deserialize)]
+struct TranscriptStreamEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    delta: Option<String>,
+    text: Option<String>,
+}
+
+fn sse_data_events(body: &str) -> Vec<String> {
+    body.split("\n\n")
+        .filter_map(|event| {
+            let data = event
+                .lines()
+                .filter_map(|line| line.strip_prefix("data:"))
+                .map(str::trim_start)
+                .collect::<Vec<_>>();
+            if data.is_empty() {
+                None
+            } else {
+                Some(data.join("\n"))
+            }
+        })
+        .collect()
 }
 
 fn transcription_url(base_url: &str) -> anyhow::Result<Url> {
