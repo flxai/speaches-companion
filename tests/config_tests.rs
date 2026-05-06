@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use trec::config::{realtime_ws_url, resolve_config, ConfigInput, DEFAULT_BASE_URL, DEFAULT_MODEL};
+use speaches_scribe::config::{
+    realtime_ws_url, resolve_config, ConfigInput, DEFAULT_BASE_URL, DEFAULT_MODEL,
+};
 
 #[test]
 fn defaults_are_derived_from_cfg() {
@@ -10,7 +12,9 @@ fn defaults_are_derived_from_cfg() {
     assert_eq!(config.model, DEFAULT_MODEL);
     assert_eq!(config.language, None);
     assert_eq!(config.duration_seconds, 10);
-    assert!(config.trace_path.starts_with("target/trec-traces"));
+    assert!(config
+        .trace_path
+        .starts_with("target/speaches-scribe-traces"));
 }
 
 #[test]

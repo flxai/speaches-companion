@@ -150,7 +150,7 @@ where
     fn notify_failure(&self, stage: &str, error: &anyhow::Error) {
         let body = dictation_error_body(stage, error);
         if let Err(notify_error) = self.notifier.notify_error(DICTATION_ERROR_SUMMARY, &body) {
-            eprintln!("trec notification failed: {notify_error:#}");
+            eprintln!("speaches-scribe notification failed: {notify_error:#}");
         }
     }
 }
@@ -229,7 +229,7 @@ pub fn default_recording_dir() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("trec-recordings")
+        .join("speaches-scribe-recordings")
 }
 
 fn recording_file_name() -> String {
@@ -237,5 +237,5 @@ fn recording_file_name() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
-    format!("trec-{}-{millis}.wav", std::process::id())
+    format!("speaches-scribe-{}-{millis}.wav", std::process::id())
 }

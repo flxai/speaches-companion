@@ -277,7 +277,7 @@ where
 
     fn notify_transcript(&self, notify: impl FnOnce(&V) -> anyhow::Result<()>) {
         if let Err(error) = notify(&self.transcript_notifier) {
-            eprintln!("trec transcript notification failed: {error:#}");
+            eprintln!("speaches-scribe transcript notification failed: {error:#}");
         }
     }
 }
@@ -330,9 +330,9 @@ where
     N: ErrorNotifier,
 {
     let body = dictation_error_body(stage, error);
-    eprintln!("trec dictation failed: {body}");
+    eprintln!("speaches-scribe dictation failed: {body}");
     if let Err(notify_error) = notifier.notify_error(DICTATION_ERROR_SUMMARY, &body) {
-        eprintln!("trec notification failed: {notify_error:#}");
+        eprintln!("speaches-scribe notification failed: {notify_error:#}");
     }
 }
 
@@ -442,7 +442,7 @@ impl LiveTranscriber for RollingHttpTranscriber {
         let session_pcm =
             StreamingPcmSession::start(shared_pcm, self.sample_rate, self.preroll).await;
         eprintln!(
-            "trec hotkey-down audio buffer: {:.2}s available; retained {:.2}s pre-roll (requested {}ms)",
+            "speaches-scribe hotkey-down audio buffer: {:.2}s available; retained {:.2}s pre-roll (requested {}ms)",
             pcm_duration(self.sample_rate, session_pcm.available_at_start_bytes()).as_secs_f64(),
             pcm_duration(self.sample_rate, session_pcm.retained_preroll_bytes()).as_secs_f64(),
             self.preroll.as_millis()
@@ -487,12 +487,12 @@ impl LiveTranscriber for RollingHttpTranscriber {
         }
         let final_audio = build_final_transcription_audio(self.sample_rate, &stt_view_pcm);
         eprintln!(
-            "trec final audio snapshot: {:.2}s raw including up to {}ms debug pre-roll",
+            "speaches-scribe final audio snapshot: {:.2}s raw including up to {}ms debug pre-roll",
             pcm_duration(self.sample_rate, raw_pcm.len()).as_secs_f64(),
             self.preroll.as_millis()
         );
         eprintln!(
-            "trec final audio sent: {:.2}s after trimming {:.2}s leading / {:.2}s trailing ({:.2}s detected trailing silence)",
+            "speaches-scribe final audio sent: {:.2}s after trimming {:.2}s leading / {:.2}s trailing ({:.2}s detected trailing silence)",
             final_audio.audio_duration.as_secs_f64(),
             final_audio.leading_trim.as_secs_f64(),
             final_audio.trailing_trim.as_secs_f64(),
@@ -509,8 +509,13 @@ impl LiveTranscriber for RollingHttpTranscriber {
         .await?;
         if let Some(transcript_dir) = self.transcript_dir.as_deref() {
             match preserve_transcript_snapshot(transcript_dir, &transcript, "final").await {
-                Ok(path) => eprintln!("trec preserved final transcript at {}", path.display()),
-                Err(error) => eprintln!("trec failed to preserve final transcript: {error:#}"),
+                Ok(path) => eprintln!(
+                    "speaches-scribe preserved final transcript at {}",
+                    path.display()
+                ),
+                Err(error) => {
+                    eprintln!("speaches-scribe failed to preserve final transcript: {error:#}")
+                }
             }
         }
         Ok(transcript)
@@ -591,11 +596,11 @@ async fn run_partial_transcriptions(loop_config: PartialTranscriptionLoop) {
                                     .await
                                     {
                                         Ok(path) => eprintln!(
-                                            "trec preserved partial transcript at {}",
+                                            "speaches-scribe preserved partial transcript at {}",
                                             path.display()
                                         ),
                                         Err(error) => eprintln!(
-                                            "trec failed to preserve partial transcript: {error:#}"
+                                            "speaches-scribe failed to preserve partial transcript: {error:#}"
                                         ),
                                     }
                                 }
@@ -610,7 +615,7 @@ async fn run_partial_transcriptions(loop_config: PartialTranscriptionLoop) {
                         }
                     }
                     Ok(None) => break,
-                    Err(error) => eprintln!("trec partial transcription failed: {error:#}"),
+                    Err(error) => eprintln!("speaches-scribe partial transcription failed: {error:#}"),
                 }
                 if updates_closed {
                     break;
@@ -641,7 +646,7 @@ async fn run_partial_transcriptions(loop_config: PartialTranscriptionLoop) {
                 };
                 if request.trailing_silence >= SEGMENT_READY_SILENCE {
                     eprintln!(
-                        "trec partial audio has {:.2}s trailing silence; future segment boundary candidate",
+                        "speaches-scribe partial audio has {:.2}s trailing silence; future segment boundary candidate",
                         request.trailing_silence.as_secs_f64()
                     );
                 }
@@ -649,7 +654,7 @@ async fn run_partial_transcriptions(loop_config: PartialTranscriptionLoop) {
                     || request.trailing_trim > Duration::ZERO
                 {
                     eprintln!(
-                        "trec partial audio sent: {:.2}s after trimming {:.2}s leading / {:.2}s trailing",
+                        "speaches-scribe partial audio sent: {:.2}s after trimming {:.2}s leading / {:.2}s trailing",
                         request.audio_duration.as_secs_f64(),
                         request.leading_trim.as_secs_f64(),
                         request.trailing_trim.as_secs_f64()
@@ -983,12 +988,18 @@ async fn preserve_transcript_snapshot(
 
 fn transcript_file_name(label: &str) -> String {
     let counter = TEMP_AUDIO_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("trec-{label}-{}-{counter}.txt", std::process::id())
+    format!(
+        "speaches-scribe-{label}-{}-{counter}.txt",
+        std::process::id()
+    )
 }
 
 fn audio_file_name(label: &str) -> String {
     let counter = TEMP_AUDIO_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("trec-{label}-{}-{counter}.wav", std::process::id())
+    format!(
+        "speaches-scribe-{label}-{}-{counter}.wav",
+        std::process::id()
+    )
 }
 
 #[derive(Debug, Clone)]

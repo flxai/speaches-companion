@@ -1,5 +1,5 @@
+use speaches_scribe::audio::write_pcm_wav;
 use tempfile::tempdir;
-use trec::audio::write_pcm_wav;
 
 #[tokio::test]
 async fn write_pcm_wav_creates_basic_mono_16bit_wav() {

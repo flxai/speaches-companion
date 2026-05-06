@@ -1,6 +1,6 @@
 use serde_json::json;
-use trec::event::{classify_event, RealtimeEvent};
-use trec::phase::{PhaseGate, PhaseResult};
+use speaches_scribe::event::{classify_event, RealtimeEvent};
+use speaches_scribe::phase::{PhaseGate, PhaseResult};
 
 #[test]
 fn classifies_input_transcription_delta() {

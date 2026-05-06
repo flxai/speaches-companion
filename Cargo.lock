@@ -1761,6 +1761,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "speaches-scribe"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "clap",
+ "futures-util",
+ "httpmock",
+ "libc",
+ "libxdo",
+ "libxdo-sys",
+ "notify-rust",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2123,31 +2148,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
-]
-
-[[package]]
-name = "trec"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "clap",
- "futures-util",
- "httpmock",
- "libc",
- "libxdo",
- "libxdo-sys",
- "notify-rust",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
- "url",
 ]
 
 [[package]]

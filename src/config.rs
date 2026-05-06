@@ -112,6 +112,6 @@ fn default_trace_path() -> PathBuf {
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
     PathBuf::from("target")
-        .join("trec-traces")
+        .join("speaches-scribe-traces")
         .join(format!("dictate-live-{millis}.jsonl"))
 }

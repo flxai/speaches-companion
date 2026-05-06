@@ -1,7 +1,9 @@
 use httpmock::prelude::*;
+use speaches_scribe::config::DEFAULT_MODEL;
+use speaches_scribe::stt::{
+    parse_streaming_transcript, transcribe_file, ResponseFormat, TranscribeOptions,
+};
 use tempfile::tempdir;
-use trec::config::DEFAULT_MODEL;
-use trec::stt::{parse_streaming_transcript, transcribe_file, ResponseFormat, TranscribeOptions};
 
 #[test]
 fn response_format_round_trips_cli_values() {

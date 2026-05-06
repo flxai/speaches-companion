@@ -39,9 +39,9 @@ jobs:
 
           tag="${GITHUB_REF_NAME}"
           system="x86_64-linux"
-          artifact="trec-${tag}-${system}"
+          artifact="speaches-scribe-${tag}-${system}"
 
-          nix build ".#packages.${system}.trec" --print-build-logs
+          nix build ".#packages.${system}.speaches-scribe" --print-build-logs
           store_path="$(readlink -f result)"
 
           mkdir -p dist release-work/package
@@ -54,14 +54,14 @@ jobs:
             | gzip -9 >"dist/${artifact}-nix-store-closure.nar.gz"
 
           cat >"dist/${artifact}-install.txt" <<EOF
-          trec ${tag} (${system})
+          speaches-scribe ${tag} (${system})
 
           Regular Nix install:
             nix profile install "github:${GITHUB_REPOSITORY}/${tag}"
 
           Import the attached Nix store closure:
             gzip -dc "${artifact}-nix-store-closure.nar.gz" | nix-store --import
-            "\$(cat ${artifact}-store-path.txt)/bin/trec" --help
+            "\$(cat ${artifact}-store-path.txt)/bin/speaches-scribe" --help
 
           The package tarball contains only the package output. It is useful for inspection,
           but the binary expects its Nix store runtime closure to be present.

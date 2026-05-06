@@ -1,5 +1,5 @@
 {
-  description = "Linux realtime dictation hotkey client";
+  description = "Speaches twin for desktop dictation";
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
 
@@ -17,7 +17,7 @@
       lib = pkgs.lib;
 
       commonArgs = {
-        pname = "trec";
+        pname = "speaches-scribe";
         version = "0.3.0";
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
@@ -26,26 +26,26 @@
         ];
 
         meta = with lib; {
-          description = "Linux realtime dictation hotkey client";
-          mainProgram = "trec";
+          description = "Speaches twin for Linux desktop dictation";
+          mainProgram = "speaches-scribe";
           platforms = platforms.linux;
         };
       };
 
-      trec = pkgs.rustPlatform.buildRustPackage (commonArgs
+      speachesScribe = pkgs.rustPlatform.buildRustPackage (commonArgs
         // {
           doCheck = false;
           nativeBuildInputs = [
             pkgs.makeWrapper
           ];
           postInstall = ''
-            wrapProgram "$out/bin/trec" \
+            wrapProgram "$out/bin/speaches-scribe" \
               --prefix PATH : ${lib.makeBinPath [pkgs.pipewire]}
           '';
         });
 
       fmt =
-        pkgs.runCommand "trec-fmt-check" {
+        pkgs.runCommand "speaches-scribe-fmt-check" {
           nativeBuildInputs = [
             pkgs.cargo
             pkgs.rustfmt
@@ -61,14 +61,14 @@
 
       clippy = pkgs.rustPlatform.buildRustPackage (commonArgs
         // {
-          pname = "trec-clippy";
+          pname = "speaches-scribe-clippy";
           doCheck = true;
           nativeBuildInputs = [
             pkgs.clippy
           ];
           buildPhase = ''
             runHook preBuild
-            touch trec-clippy
+            touch speaches-scribe-clippy
             runHook postBuild
           '';
           checkPhase = ''
@@ -85,11 +85,11 @@
 
       tests = pkgs.rustPlatform.buildRustPackage (commonArgs
         // {
-          pname = "trec-test";
+          pname = "speaches-scribe-test";
           doCheck = true;
           buildPhase = ''
             runHook preBuild
-            touch trec-test
+            touch speaches-scribe-test
             runHook postBuild
           '';
           checkPhase = ''
@@ -106,24 +106,24 @@
 
       mkSubcommandApp = subcommand: description: let
         app = pkgs.writeShellApplication {
-          name = "trec-${subcommand}";
+          name = "speaches-scribe-${subcommand}";
           text = ''
-            exec ${trec}/bin/trec ${subcommand} "$@"
+            exec ${speachesScribe}/bin/speaches-scribe ${subcommand} "$@"
           '';
         };
       in {
         type = "app";
-        program = "${app}/bin/trec-${subcommand}";
+        program = "${app}/bin/speaches-scribe-${subcommand}";
         meta.description = description;
       };
     in {
       packages = {
-        default = trec;
-        trec = trec;
+        default = speachesScribe;
+        speaches-scribe = speachesScribe;
       };
 
       checks = {
-        default = trec;
+        default = speachesScribe;
         fmt = fmt;
         clippy = clippy;
         test = tests;
@@ -132,15 +132,15 @@
       apps = {
         default = {
           type = "app";
-          program = "${trec}/bin/trec";
-          meta.description = "Run trec";
+          program = "${speachesScribe}/bin/speaches-scribe";
+          meta.description = "Run speaches-scribe";
         };
-        trec = {
+        speaches-scribe = {
           type = "app";
-          program = "${trec}/bin/trec";
-          meta.description = "Run trec";
+          program = "${speachesScribe}/bin/speaches-scribe";
+          meta.description = "Run speaches-scribe";
         };
-        daemon = mkSubcommandApp "daemon" "Run the trec hotkey daemon";
+        daemon = mkSubcommandApp "daemon" "Run the speaches-scribe hotkey daemon";
         "dictate-live" = mkSubcommandApp "dictate-live" "Run realtime dictation";
         hotkey = mkSubcommandApp "hotkey" "Send a hotkey IPC command";
         inject = mkSubcommandApp "inject" "Type text into the focused X11 window";
@@ -150,7 +150,7 @@
 
       devShells.default = pkgs.mkShell {
         inputsFrom = [
-          trec
+          speachesScribe
           clippy
         ];
         packages = with pkgs; [

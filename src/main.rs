@@ -3,23 +3,26 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
-use trec::audio::{record_wav_with_pw_record, STT_SAMPLE_RATE};
-use trec::config::{resolve_config, ConfigInput};
-use trec::daemon::run_daemon;
-use trec::inject::{LibXdoTextInjector, TextInjector};
-use trec::ipc::{default_socket_path, send_command, IpcCommand};
-use trec::notification::{
+use speaches_scribe::audio::{record_wav_with_pw_record, STT_SAMPLE_RATE};
+use speaches_scribe::config::{resolve_config, ConfigInput};
+use speaches_scribe::daemon::run_daemon;
+use speaches_scribe::inject::{LibXdoTextInjector, TextInjector};
+use speaches_scribe::ipc::{default_socket_path, send_command, IpcCommand};
+use speaches_scribe::notification::{
     DesktopErrorNotifier, ErrorNotifier, NoopTranscriptNotifier, HOTKEY_ERROR_SUMMARY,
 };
-use trec::phase::PhaseResult;
-use trec::realtime::run_dictate_live;
-use trec::streaming::{RollingHttpTranscriber, StreamingDictationController};
-use trec::stt::{transcribe_file, ResponseFormat, TranscribeOptions};
+use speaches_scribe::phase::PhaseResult;
+use speaches_scribe::realtime::run_dictate_live;
+use speaches_scribe::streaming::{RollingHttpTranscriber, StreamingDictationController};
+use speaches_scribe::stt::{transcribe_file, ResponseFormat, TranscribeOptions};
 
 const DEFAULT_LISTENING_MARKER: &str = "💬";
 
 #[derive(Debug, Parser)]
-#[command(name = "trec", about = "Linux realtime dictation spike")]
+#[command(
+    name = "speaches-scribe",
+    about = "Speaches companion for Linux desktop dictation"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -121,7 +124,7 @@ struct TranscribeArgs {
 struct SmokeArgs {
     #[arg(long, default_value = "3")]
     record_seconds: u64,
-    #[arg(long, default_value = "target/trec-smoke/speaches-mic.wav")]
+    #[arg(long, default_value = "target/speaches-scribe-smoke/speaches-mic.wav")]
     record_output: PathBuf,
     #[arg(long)]
     base_url: Option<String>,
@@ -164,7 +167,7 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     let socket_path = args.socket_path.unwrap_or_else(default_socket_path);
     if let Some(transcript_dir) = transcript_dir.as_ref() {
         eprintln!(
-            "trec preserving transcripts in {}",
+            "speaches-scribe preserving transcripts in {}",
             transcript_dir.display()
         );
     }
@@ -173,10 +176,10 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
         cli_model: args.model,
         cli_language: args.language,
         env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
-        env_model: std::env::var("TREC_MODEL")
+        env_model: std::env::var("SPEACHES_SCRIBE_MODEL")
             .ok()
             .or_else(|| std::env::var("SPEACHES_STT_MODEL").ok()),
-        env_language: std::env::var("TREC_LANGUAGE").ok(),
+        env_language: std::env::var("SPEACHES_SCRIBE_LANGUAGE").ok(),
         ..ConfigInput::default()
     });
     let transcriber = RollingHttpTranscriber::new(
@@ -196,16 +199,16 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     .with_leading_silence(Duration::from_millis(args.leading_silence_ms))
     .with_preroll(Duration::from_millis(args.preroll_ms))
     .with_transcript_dir(transcript_dir);
-    eprintln!("trec starting continuous audio capture...");
+    eprintln!("speaches-scribe starting continuous audio capture...");
     if let Err(error) = transcriber.prepare_capture().await {
-        eprintln!("trec failed to start continuous audio capture: {error:#}");
+        eprintln!("speaches-scribe failed to start continuous audio capture: {error:#}");
         return ExitCode::from(1);
     }
-    eprintln!("trec continuous audio capture ready");
-    eprintln!("trec warming transcription backend...");
+    eprintln!("speaches-scribe continuous audio capture ready");
+    eprintln!("speaches-scribe warming transcription backend...");
     match transcriber.warm_up_transcription().await {
-        Ok(()) => eprintln!("trec transcription backend ready"),
-        Err(error) => eprintln!("trec transcription warmup failed: {error:#}"),
+        Ok(()) => eprintln!("speaches-scribe transcription backend ready"),
+        Err(error) => eprintln!("speaches-scribe transcription warmup failed: {error:#}"),
     }
     let injector = LibXdoTextInjector::default();
     let controller = StreamingDictationController::new_with_notifiers(
@@ -217,11 +220,14 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     .with_listening_marker(listening_marker)
     .with_inline_partials(inline_partials);
 
-    eprintln!("trec daemon listening on {}", socket_path.display());
+    eprintln!(
+        "speaches-scribe daemon listening on {}",
+        socket_path.display()
+    );
     match run_daemon(&socket_path, controller).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("trec daemon failed: {error:#}");
+            eprintln!("speaches-scribe daemon failed: {error:#}");
             ExitCode::from(1)
         }
     }
@@ -265,7 +271,7 @@ where
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("trec hotkey failed: {error:#}");
+            eprintln!("speaches-scribe hotkey failed: {error:#}");
             notify_hotkey_failure(&notifier, &error);
             ExitCode::from(1)
         }
@@ -278,7 +284,7 @@ where
 {
     let body = format!("{error:#}");
     if let Err(notify_error) = notifier.notify_error(HOTKEY_ERROR_SUMMARY, &body) {
-        eprintln!("trec notification failed: {notify_error:#}");
+        eprintln!("speaches-scribe notification failed: {notify_error:#}");
     }
 }
 
@@ -298,7 +304,7 @@ async fn run_transcribe_command(args: TranscribeArgs) -> ExitCode {
         cli_base_url: args.base_url,
         cli_model: args.model,
         env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
-        env_model: std::env::var("TREC_MODEL")
+        env_model: std::env::var("SPEACHES_SCRIBE_MODEL")
             .ok()
             .or_else(|| std::env::var("SPEACHES_STT_MODEL").ok()),
         ..ConfigInput::default()
@@ -361,8 +367,8 @@ async fn run_dictate_live_command(args: DictateLiveArgs) -> ExitCode {
         cli_duration_seconds: args.duration_seconds,
         cli_trace_path: args.trace_path,
         env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
-        env_model: std::env::var("TREC_MODEL").ok(),
-        env_language: std::env::var("TREC_LANGUAGE").ok(),
+        env_model: std::env::var("SPEACHES_SCRIBE_MODEL").ok(),
+        env_language: std::env::var("SPEACHES_SCRIBE_LANGUAGE").ok(),
     });
 
     match run_dictate_live(config).await {
@@ -395,8 +401,10 @@ mod tests {
 
     #[tokio::test]
     async fn hotkey_connection_error_sends_desktop_error_notification() {
-        let socket_path =
-            std::env::temp_dir().join(format!("trec-missing-hotkey-{}.sock", std::process::id()));
+        let socket_path = std::env::temp_dir().join(format!(
+            "speaches-scribe-missing-hotkey-{}.sock",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&socket_path);
         let notifier = FakeErrorNotifier::default();
         let notifications = notifier.notifications.clone();
@@ -416,7 +424,7 @@ mod tests {
         assert_eq!(notifications[0].0, HOTKEY_ERROR_SUMMARY);
         assert!(notifications[0]
             .1
-            .contains("failed to connect to trec daemon"));
+            .contains("failed to connect to speaches-scribe daemon"));
         assert!(notifications[0]
             .1
             .contains(&socket_path.display().to_string()));
@@ -424,7 +432,7 @@ mod tests {
 
     #[test]
     fn daemon_defaults_insert_marker_and_live_partials() {
-        let args = parse_daemon_args(["trec", "daemon"]);
+        let args = parse_daemon_args(["speaches-scribe", "daemon"]);
 
         assert_eq!(
             resolve_listening_marker(&args),
@@ -436,16 +444,16 @@ mod tests {
 
     #[test]
     fn daemon_flags_can_disable_marker_and_live_partials() {
-        let args = parse_daemon_args(["trec", "daemon", "--no-listening-marker"]);
+        let args = parse_daemon_args(["speaches-scribe", "daemon", "--no-listening-marker"]);
         assert_eq!(resolve_listening_marker(&args), None);
 
-        let args = parse_daemon_args(["trec", "daemon", "--no-inline-partials"]);
+        let args = parse_daemon_args(["speaches-scribe", "daemon", "--no-inline-partials"]);
         assert!(!resolve_inline_partials(&args));
     }
 
     #[test]
     fn daemon_accepts_custom_listening_marker() {
-        let args = parse_daemon_args(["trec", "daemon", "--listening-marker", "..."]);
+        let args = parse_daemon_args(["speaches-scribe", "daemon", "--listening-marker", "..."]);
 
         assert_eq!(resolve_listening_marker(&args), Some("...".to_string()));
         assert!(resolve_inline_partials(&args));
@@ -453,26 +461,35 @@ mod tests {
 
     #[test]
     fn daemon_accepts_custom_preroll() {
-        let args = parse_daemon_args(["trec", "daemon", "--preroll-ms", "1000"]);
+        let args = parse_daemon_args(["speaches-scribe", "daemon", "--preroll-ms", "1000"]);
 
         assert_eq!(args.preroll_ms, 1_000);
     }
 
     #[test]
     fn daemon_accepts_transcript_dir() {
-        let args = parse_daemon_args(["trec", "daemon", "--transcript-dir", "target/trec-debug"]);
+        let args = parse_daemon_args([
+            "speaches-scribe",
+            "daemon",
+            "--transcript-dir",
+            "target/speaches-scribe-debug",
+        ]);
 
         assert_eq!(
             args.transcript_dir,
-            Some(PathBuf::from("target/trec-debug"))
+            Some(PathBuf::from("target/speaches-scribe-debug"))
         );
     }
 
     #[test]
     fn daemon_rejects_record_dir() {
-        assert!(
-            Cli::try_parse_from(["trec", "daemon", "--record-dir", "target/trec-debug"]).is_err()
-        );
+        assert!(Cli::try_parse_from([
+            "speaches-scribe",
+            "daemon",
+            "--record-dir",
+            "target/speaches-scribe-debug"
+        ])
+        .is_err());
     }
 
     fn parse_daemon_args<const N: usize>(args: [&str; N]) -> DaemonArgs {

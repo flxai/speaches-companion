@@ -1,8 +1,10 @@
 use std::path::Path;
 
+use speaches_scribe::daemon::{DaemonResponse, DaemonState};
+use speaches_scribe::ipc::{
+    command_line, default_socket_path, parse_command, send_command, IpcCommand,
+};
 use tempfile::tempdir;
-use trec::daemon::{DaemonResponse, DaemonState};
-use trec::ipc::{command_line, default_socket_path, parse_command, send_command, IpcCommand};
 
 #[test]
 fn ipc_command_lines_match_i3_hotkey_commands() {
@@ -57,14 +59,14 @@ fn response_strings_are_stable_for_i3_clients() {
 fn default_socket_path_uses_runtime_directory_when_available() {
     let path = default_socket_path();
 
-    assert!(path.ends_with(Path::new("trec.sock")));
+    assert!(path.ends_with(Path::new("speaches-scribe.sock")));
     assert!(path.is_absolute());
 }
 
 #[tokio::test]
 async fn hotkey_client_sends_command_to_unix_socket() {
     let dir = tempdir().unwrap();
-    let socket_path = dir.path().join("trec.sock");
+    let socket_path = dir.path().join("speaches-scribe.sock");
     let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
 
     let server = tokio::spawn(async move {

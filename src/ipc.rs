@@ -14,7 +14,7 @@ pub fn parse_command(line: &str) -> anyhow::Result<IpcCommand> {
     match line.trim() {
         "hotkey down" => Ok(IpcCommand::HotkeyDown),
         "hotkey up" => Ok(IpcCommand::HotkeyUp),
-        command => bail!("unknown trec IPC command: {command}"),
+        command => bail!("unknown speaches-scribe IPC command: {command}"),
     }
 }
 
@@ -30,29 +30,29 @@ pub fn default_socket_path() -> PathBuf {
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("trec.sock")
+        .join("speaches-scribe.sock")
 }
 
 pub async fn send_command(socket_path: &Path, command: IpcCommand) -> anyhow::Result<String> {
     let mut stream = UnixStream::connect(socket_path).await.with_context(|| {
         format!(
-            "failed to connect to trec daemon at {}",
+            "failed to connect to speaches-scribe daemon at {}",
             socket_path.display()
         )
     })?;
     stream
         .write_all(format!("{}\n", command_line(command)).as_bytes())
         .await
-        .context("failed to send command to trec daemon")?;
+        .context("failed to send command to speaches-scribe daemon")?;
     stream
         .shutdown()
         .await
-        .context("failed to finish trec daemon request")?;
+        .context("failed to finish speaches-scribe daemon request")?;
 
     let mut response = String::new();
     stream
         .read_to_string(&mut response)
         .await
-        .context("failed to read trec daemon response")?;
+        .context("failed to read speaches-scribe daemon response")?;
     Ok(response.trim().to_string())
 }

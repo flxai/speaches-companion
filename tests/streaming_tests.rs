@@ -2,14 +2,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
-use trec::daemon::{DaemonResponse, HotkeyHandler};
-use trec::inject::{FocusedWindow, TextInjector};
-use trec::ipc::IpcCommand;
-use trec::notification::{ErrorNotifier, TranscriptNotifier, DICTATION_ERROR_SUMMARY};
-use trec::streaming::{
+use speaches_scribe::daemon::{DaemonResponse, HotkeyHandler};
+use speaches_scribe::inject::{FocusedWindow, TextInjector};
+use speaches_scribe::ipc::IpcCommand;
+use speaches_scribe::notification::{ErrorNotifier, TranscriptNotifier, DICTATION_ERROR_SUMMARY};
+use speaches_scribe::streaming::{
     LiveTranscriber, LiveTranscriptUpdate, LiveTranscriptionSession, StreamingDictationController,
 };
+use tokio::sync::mpsc;
 
 #[tokio::test]
 async fn streaming_hotkey_replaces_partial_text_with_final_text() {

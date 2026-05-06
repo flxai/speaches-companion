@@ -285,7 +285,7 @@ mod tests {
         let reader = process.clone_reader().unwrap();
 
         process
-            .type_text("echo typed through trec", Duration::ZERO)
+            .type_text("echo typed through speaches-scribe", Duration::ZERO)
             .unwrap();
         process.press_enter().unwrap();
 
@@ -293,7 +293,7 @@ mod tests {
         assert!(status.success());
 
         let output = collect_pty_output(reader).unwrap();
-        assert!(output.contains("captured:echo typed through trec"));
+        assert!(output.contains("captured:echo typed through speaches-scribe"));
     }
 
     #[test]

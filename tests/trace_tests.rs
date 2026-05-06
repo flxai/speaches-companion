@@ -1,6 +1,6 @@
 use serde_json::json;
+use speaches_scribe::trace::TraceWriter;
 use tempfile::tempdir;
-use trec::trace::TraceWriter;
 
 #[tokio::test]
 async fn trace_writer_preserves_jsonl_order() {
