@@ -29,6 +29,22 @@ speculative text is replaced with the final transcript. If focus changes during 
 recording, `trec` stops editing the target window instead of sending Backspaces
 to the wrong place.
 
+By default, the daemon inserts `💬` after audio capture starts, so it doubles as
+the "safe to speak" cue and is replaced by partial/final text. Override or
+disable it with:
+
+```sh
+nix run . -- daemon --listening-marker "..."
+nix run . -- daemon --no-listening-marker
+```
+
+Partial transcription starts without an artificial minimum recording duration.
+Tune the rolling request cadence if needed:
+
+```sh
+nix run . -- daemon --partial-interval-ms 750 --partial-min-duration-ms 0
+```
+
 Speaches SSE transcription responses can be tested with:
 
 ```sh

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use trec::audio::{record_wav_with_pw_record, STT_SAMPLE_RATE};
@@ -44,6 +45,14 @@ struct DaemonArgs {
     record_dir: Option<PathBuf>,
     #[arg(long)]
     stream_response: bool,
+    #[arg(long, default_value = "💬")]
+    listening_marker: String,
+    #[arg(long)]
+    no_listening_marker: bool,
+    #[arg(long, default_value = "1250")]
+    partial_interval_ms: u64,
+    #[arg(long, default_value = "0")]
+    partial_min_duration_ms: u64,
 }
 
 #[derive(Debug, Args)]
@@ -166,14 +175,22 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
             without_timestamps: true,
             stream: args.stream_response,
         },
-    );
+    )
+    .with_partial_interval(Duration::from_millis(args.partial_interval_ms))
+    .with_partial_min_duration(Duration::from_millis(args.partial_min_duration_ms));
+    let listening_marker = if args.no_listening_marker {
+        None
+    } else {
+        Some(args.listening_marker)
+    };
     let injector = LibXdoTextInjector::default();
     let controller = StreamingDictationController::new_with_notifiers(
         transcriber,
         injector,
         NoopTranscriptNotifier,
         NoopErrorNotifier,
-    );
+    )
+    .with_listening_marker(listening_marker);
 
     eprintln!("trec daemon listening on {}", socket_path.display());
     match run_daemon(&socket_path, controller).await {

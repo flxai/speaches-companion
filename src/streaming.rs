@@ -51,6 +51,7 @@ where
     injector: I,
     transcript_notifier: V,
     error_notifier: N,
+    listening_marker: Option<String>,
     active: Option<ActiveStreamingSession<L::Session, I>>,
 }
 
@@ -73,6 +74,7 @@ where
             injector,
             transcript_notifier: NoopTranscriptNotifier,
             error_notifier: NoopErrorNotifier,
+            listening_marker: None,
             active: None,
         }
     }
@@ -96,8 +98,15 @@ where
             injector,
             transcript_notifier,
             error_notifier,
+            listening_marker: None,
             active: None,
         }
+    }
+
+    pub fn with_listening_marker(mut self, marker: Option<String>) -> Self {
+        self.listening_marker =
+            marker.and_then(|marker| normalize_transcript_for_injection(&marker));
+        self
     }
 
     pub fn is_recording(&self) -> bool {
@@ -133,7 +142,7 @@ where
             return Ok(DaemonResponse::AlreadyRecording);
         }
 
-        let text_session = match SpeculativeTextSession::start(self.injector.clone()) {
+        let mut text_session = match SpeculativeTextSession::start(self.injector.clone()) {
             Ok(session) => session,
             Err(error) => {
                 self.notify_failure("Dictation target capture failed", &error);
@@ -147,6 +156,13 @@ where
                 return Err(error);
             }
         };
+        if let Some(marker) = self.listening_marker.as_deref() {
+            if let Err(error) = text_session.replace_text(marker) {
+                let _ = self.transcriber.stop(live_session.session).await;
+                self.notify_failure("Listening marker injection failed", &error);
+                return Err(error);
+            }
+        }
         self.notify_transcript(|notifier| notifier.notify_listening());
 
         let partial_task = tokio::spawn(consume_live_updates(
@@ -184,12 +200,26 @@ where
             }
         };
 
-        if let Some(text) = normalize_transcript_for_injection(&final_transcript) {
-            if let Err(error) = text_session.replace_text(&text) {
-                self.notify_failure("Final text replacement failed", &error);
-                return Err(error);
+        match normalize_transcript_for_injection(&final_transcript) {
+            Some(text) => {
+                if let Err(error) = text_session.replace_text(&text) {
+                    self.notify_failure("Final text replacement failed", &error);
+                    return Err(error);
+                }
+                self.notify_transcript(|notifier| notifier.notify_final(&text));
             }
-            self.notify_transcript(|notifier| notifier.notify_final(&text));
+            None => {
+                if self
+                    .listening_marker
+                    .as_deref()
+                    .is_some_and(|marker| text_session.inserted_text() == marker)
+                {
+                    if let Err(error) = text_session.replace_text("") {
+                        self.notify_failure("Listening marker cleanup failed", &error);
+                        return Err(error);
+                    }
+                }
+            }
         }
 
         Ok(DaemonResponse::Stopped)
@@ -255,9 +285,19 @@ impl RollingHttpTranscriber {
             base_url,
             options,
             partial_interval: Duration::from_millis(1_250),
-            partial_min_duration: Duration::from_millis(2_500),
+            partial_min_duration: Duration::ZERO,
             sample_rate: STT_SAMPLE_RATE,
         }
+    }
+
+    pub fn with_partial_interval(mut self, interval: Duration) -> Self {
+        self.partial_interval = interval.max(Duration::from_millis(1));
+        self
+    }
+
+    pub fn with_partial_min_duration(mut self, duration: Duration) -> Self {
+        self.partial_min_duration = duration;
+        self
     }
 }
 
@@ -349,7 +389,7 @@ async fn run_partial_transcriptions(loop_config: PartialTranscriptionLoop) {
             }
             _ = ticker.tick() => {
                 let pcm = shared_pcm.lock().await.clone();
-                if pcm.len() < min_bytes {
+                if pcm.is_empty() || pcm.len() < min_bytes {
                     continue;
                 }
                 match transcribe_pcm_snapshot_until_stop(
@@ -571,6 +611,20 @@ mod tests {
         );
         assert_eq!(
             stabilizer.observe(Duration::from_millis(3_750), "hello world again"),
+            Some("hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn partials_can_emit_without_minimum_audio_duration() {
+        let mut stabilizer = PartialTranscriptStabilizer::new(Duration::ZERO);
+
+        assert_eq!(
+            stabilizer.observe(Duration::from_millis(100), "hello world"),
+            None
+        );
+        assert_eq!(
+            stabilizer.observe(Duration::from_millis(200), "hello world again"),
             Some("hello world".to_string())
         );
     }

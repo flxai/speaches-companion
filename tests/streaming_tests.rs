@@ -63,6 +63,70 @@ async fn streaming_hotkey_replaces_partial_text_with_final_text() {
 }
 
 #[tokio::test]
+async fn streaming_marker_is_replaced_by_partial_and_final_text() {
+    let transcriber = FakeLiveTranscriber::new(["hello"], Ok("  hello window\n".to_string()));
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        FakeErrorNotifier::default(),
+    )
+    .with_listening_marker(Some("💬".to_string()));
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    controller
+        .handle_hotkey(IpcCommand::HotkeyUp)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            InjectOperation::Type("💬".to_string()),
+            InjectOperation::Backspace(1),
+            InjectOperation::Type("hello".to_string()),
+            InjectOperation::Type(" window".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn streaming_marker_is_erased_when_no_transcript_arrives() {
+    let transcriber = FakeLiveTranscriber::new(Vec::<String>::new(), Ok(" \n".to_string()));
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        FakeErrorNotifier::default(),
+    )
+    .with_listening_marker(Some("💬".to_string()));
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    controller
+        .handle_hotkey(IpcCommand::HotkeyUp)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            InjectOperation::Type("💬".to_string()),
+            InjectOperation::Backspace(1),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn streaming_uses_last_partial_when_final_is_empty() {
     let transcriber = FakeLiveTranscriber::new(["fallback text"], Ok(" \n".to_string()));
     let injector = FakeInjector::default();
@@ -301,10 +365,12 @@ impl Default for FakeInjector {
 
 impl TextInjector for FakeInjector {
     fn inject_text(&self, text: &str) -> anyhow::Result<()> {
-        self.operations
-            .lock()
-            .unwrap()
-            .push(InjectOperation::Type(text.to_string()));
+        if !text.is_empty() {
+            self.operations
+                .lock()
+                .unwrap()
+                .push(InjectOperation::Type(text.to_string()));
+        }
         Ok(())
     }
 
