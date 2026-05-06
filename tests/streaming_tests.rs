@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 use trec::daemon::{DaemonResponse, HotkeyHandler};
 use trec::inject::{FocusedWindow, TextInjector};
 use trec::ipc::IpcCommand;
@@ -58,6 +60,68 @@ async fn streaming_hotkey_replaces_partial_text_with_final_text() {
         vec![
             TranscriptNotice::Listening,
             TranscriptNotice::Final("hello window".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn streaming_injects_live_partial_before_hotkey_up() {
+    let transcriber = ManualLiveTranscriber::new("hello window");
+    let updates = transcriber.updates.clone();
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        FakeErrorNotifier::default(),
+    );
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    updates.send("hel").await;
+    wait_for_operations_len(&operations, 1).await;
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![InjectOperation::Type("hel".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn streaming_marker_is_replaced_by_live_partial_before_hotkey_up() {
+    let transcriber = ManualLiveTranscriber::new("hello window");
+    let updates = transcriber.updates.clone();
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        FakeErrorNotifier::default(),
+    )
+    .with_listening_marker(Some("💬".to_string()));
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![InjectOperation::Type("💬".to_string())]
+    );
+
+    updates.send("hello").await;
+    wait_for_operations_len(&operations, 3).await;
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            InjectOperation::Type("💬".to_string()),
+            InjectOperation::Backspace(1),
+            InjectOperation::Type("hello".to_string()),
         ]
     );
 }
@@ -155,7 +219,8 @@ async fn streaming_uses_last_partial_when_final_is_empty() {
 
 #[tokio::test]
 async fn streaming_can_defer_partial_injection_until_stop() {
-    let transcriber = FakeLiveTranscriber::new(["fallback text"], Ok(" \n".to_string()));
+    let transcriber = ManualLiveTranscriber::new(" \n");
+    let updates = transcriber.updates.clone();
     let injector = FakeInjector::default();
     let operations = injector.operations.clone();
     let mut controller = StreamingDictationController::new_with_notifiers(
@@ -170,7 +235,7 @@ async fn streaming_can_defer_partial_injection_until_stop() {
         .handle_hotkey(IpcCommand::HotkeyDown)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    updates.send_until_first_is_processed("fallback text").await;
     assert!(operations.lock().unwrap().is_empty());
 
     controller
@@ -186,7 +251,8 @@ async fn streaming_can_defer_partial_injection_until_stop() {
 
 #[tokio::test]
 async fn streaming_stop_error_keeps_speculative_partial_and_notifies() {
-    let transcriber = FakeLiveTranscriber::new(["partial"], Err("connection refused".to_string()));
+    let transcriber = ManualLiveTranscriber::failing("connection refused");
+    let updates = transcriber.updates.clone();
     let injector = FakeInjector::default();
     let operations = injector.operations.clone();
     let error_notifier = FakeErrorNotifier::default();
@@ -202,7 +268,8 @@ async fn streaming_stop_error_keeps_speculative_partial_and_notifies() {
         .handle_hotkey(IpcCommand::HotkeyDown)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    updates.send("partial").await;
+    wait_for_operations_len(&operations, 1).await;
     let error = controller
         .handle_hotkey(IpcCommand::HotkeyUp)
         .await
@@ -375,6 +442,88 @@ async fn streaming_starts_audio_capture_before_target_snapshot() {
 
 #[derive(Clone)]
 struct FakeSession;
+
+#[derive(Clone)]
+struct ManualLiveTranscriber {
+    updates: ManualLiveUpdates,
+    final_result: Result<String, String>,
+}
+
+impl ManualLiveTranscriber {
+    fn new(final_transcript: impl Into<String>) -> Self {
+        Self {
+            updates: ManualLiveUpdates::default(),
+            final_result: Ok(final_transcript.into()),
+        }
+    }
+
+    fn failing(message: impl Into<String>) -> Self {
+        Self {
+            updates: ManualLiveUpdates::default(),
+            final_result: Err(message.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl LiveTranscriber for ManualLiveTranscriber {
+    type Session = FakeSession;
+
+    async fn start(&self) -> anyhow::Result<LiveTranscriptionSession<Self::Session>> {
+        let (updates_tx, updates_rx) = mpsc::channel(1);
+        *self.updates.sender.lock().unwrap() = Some(updates_tx);
+        Ok(LiveTranscriptionSession {
+            session: FakeSession,
+            updates: updates_rx,
+        })
+    }
+
+    async fn stop(&self, _session: Self::Session) -> anyhow::Result<String> {
+        self.updates.sender.lock().unwrap().take();
+        self.final_result.clone().map_err(anyhow::Error::msg)
+    }
+}
+
+#[derive(Clone, Default)]
+struct ManualLiveUpdates {
+    sender: Arc<Mutex<Option<mpsc::Sender<LiveTranscriptUpdate>>>>,
+}
+
+impl ManualLiveUpdates {
+    async fn send(&self, transcript: &str) {
+        let sender = self.sender.lock().unwrap().clone().unwrap();
+        sender
+            .send(LiveTranscriptUpdate {
+                transcript: transcript.to_string(),
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn send_until_first_is_processed(&self, transcript: &str) {
+        // With a one-slot channel, completing the third send means the receiver
+        // has returned to recv after fully handling the first update.
+        self.send(transcript).await;
+        self.send(transcript).await;
+        self.send(transcript).await;
+    }
+}
+
+async fn wait_for_operations_len(
+    operations: &Arc<Mutex<Vec<InjectOperation>>>,
+    expected_len: usize,
+) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if operations.lock().unwrap().len() >= expected_len {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
 
 #[derive(Clone)]
 struct OrderingTranscriber {
