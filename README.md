@@ -1,6 +1,18 @@
-# trec
+# speaches-scribe
 
-Linux realtime dictation hotkey client for Speaches.
+Linux desktop dictation for Speaches.
+
+`speaches-scribe` is the desktop twin to
+[Speaches](https://github.com/speaches-ai/speaches): Speaches runs the speech
+recognition service, and `speaches-scribe` captures microphone audio, sends it
+to that service, and injects the transcript into the focused X11 window. It is
+not a standalone transcription engine and only works in conjunction with a
+running Speaches-compatible server.
+
+The Nix flake is the primary interface. It builds the `speaches-scribe` binary,
+wraps it with the required `pw-record` runtime dependency, and exposes the
+daemon, hotkey, smoke-test, injection, and transcription subcommands as flake
+apps.
 
 ## Running
 
@@ -8,6 +20,7 @@ Run the default CLI from the flake:
 
 ```sh
 nix run . -- --help
+nix run .#speaches-scribe -- --help
 nix run . -- daemon
 ```
 
@@ -22,11 +35,16 @@ nix run .#hotkey -- down
 nix run .#hotkey -- up
 ```
 
+`speaches-scribe` expects Speaches to be reachable at `SPEACHES_BASE_URL`
+or through `--base-url`. Choose the Speaches model with
+`SPEACHES_SCRIBE_MODEL` or `--model`, and optionally set
+`SPEACHES_SCRIBE_LANGUAGE` or `--language`.
+
 The daemon uses rolling HTTP dictation: while the hotkey is held, audio is
 recorded and partial transcripts are collected. On release, the full recording
-is transcribed and injected into the focused X11 window. If focus changes during
-a recording, `trec` stops editing the target window instead of sending
-Backspaces to the wrong place.
+is sent to Speaches, transcribed, and injected into the focused X11 window. If
+focus changes during a recording, `speaches-scribe` stops editing the target
+window instead of sending Backspaces to the wrong place.
 
 On startup the daemon starts continuous `pw-record` capture before it accepts
 hotkey-driven dictation. If that capture cannot start, daemon startup fails
@@ -72,7 +90,7 @@ To preserve the accepted partial and final transcripts without writing debug
 audio into a project directory:
 
 ```sh
-nix run . -- daemon --transcript-dir target/trec-transcripts
+nix run . -- daemon --transcript-dir target/speaches-scribe-transcripts
 ```
 
 Speaches SSE transcription responses can be tested with:
@@ -84,7 +102,7 @@ nix run . -- daemon --stream-response
 
 ## Development
 
-`trec` links to `libxdo`, so raw `cargo run` needs the Nix development shell:
+`speaches-scribe` links to `libxdo`, so raw `cargo run` needs the Nix development shell:
 
 ```sh
 nix develop -c cargo run -- --help
