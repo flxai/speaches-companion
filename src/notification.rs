@@ -3,6 +3,7 @@ use notify_rust::{Notification, Timeout, Urgency};
 pub const DICTATION_ERROR_SUMMARY: &str = "trec dictation failed";
 pub const DICTATION_PARTIAL_SUMMARY: &str = "trec dictating";
 pub const DICTATION_FINAL_SUMMARY: &str = "trec dictation";
+pub const HOTKEY_ERROR_SUMMARY: &str = "trec hotkey failed";
 const TRANSCRIPT_NOTIFICATION_ID: u32 = 0x7472_6563;
 
 pub trait ErrorNotifier: Send + Sync {

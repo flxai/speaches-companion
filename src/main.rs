@@ -8,7 +8,10 @@ use trec::config::{resolve_config, ConfigInput};
 use trec::daemon::run_daemon;
 use trec::inject::{LibXdoTextInjector, TextInjector};
 use trec::ipc::{default_socket_path, send_command, IpcCommand};
-use trec::notification::{NoopErrorNotifier, NoopTranscriptNotifier};
+use trec::notification::{
+    DesktopErrorNotifier, ErrorNotifier, NoopErrorNotifier, NoopTranscriptNotifier,
+    HOTKEY_ERROR_SUMMARY,
+};
 use trec::phase::PhaseResult;
 use trec::realtime::run_dictate_live;
 use trec::streaming::{RollingHttpTranscriber, StreamingDictationController};
@@ -206,6 +209,13 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
 }
 
 async fn run_hotkey_command(args: HotkeyArgs) -> ExitCode {
+    run_hotkey_command_with_notifier(args, DesktopErrorNotifier).await
+}
+
+async fn run_hotkey_command_with_notifier<N>(args: HotkeyArgs, notifier: N) -> ExitCode
+where
+    N: ErrorNotifier,
+{
     let socket_path = args.socket_path.unwrap_or_else(default_socket_path);
     let command = match args.action {
         HotkeyAction::Down => IpcCommand::HotkeyDown,
@@ -221,8 +231,19 @@ async fn run_hotkey_command(args: HotkeyArgs) -> ExitCode {
         }
         Err(error) => {
             eprintln!("trec hotkey failed: {error:#}");
+            notify_hotkey_failure(&notifier, &error);
             ExitCode::from(1)
         }
+    }
+}
+
+fn notify_hotkey_failure<N>(notifier: &N, error: &anyhow::Error)
+where
+    N: ErrorNotifier,
+{
+    let body = format!("{error:#}");
+    if let Err(notify_error) = notifier.notify_error(HOTKEY_ERROR_SUMMARY, &body) {
+        eprintln!("trec notification failed: {notify_error:#}");
     }
 }
 
@@ -327,6 +348,56 @@ async fn run_dictate_live_command(args: DictateLiveArgs) -> ExitCode {
         Err(error) => {
             eprintln!("dictate-live failed: {error:#}");
             ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn hotkey_connection_error_sends_desktop_error_notification() {
+        let socket_path =
+            std::env::temp_dir().join(format!("trec-missing-hotkey-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket_path);
+        let notifier = FakeErrorNotifier::default();
+        let notifications = notifier.notifications.clone();
+
+        let _exit_code = run_hotkey_command_with_notifier(
+            HotkeyArgs {
+                action: HotkeyAction::Down,
+                socket_path: Some(socket_path.clone()),
+            },
+            notifier,
+        )
+        .await;
+
+        let notifications = notifications.lock().unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].0, HOTKEY_ERROR_SUMMARY);
+        assert!(notifications[0]
+            .1
+            .contains("failed to connect to trec daemon"));
+        assert!(notifications[0]
+            .1
+            .contains(&socket_path.display().to_string()));
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeErrorNotifier {
+        notifications: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl ErrorNotifier for FakeErrorNotifier {
+        fn notify_error(&self, summary: &str, body: &str) -> anyhow::Result<()> {
+            self.notifications
+                .lock()
+                .unwrap()
+                .push((summary.to_string(), body.to_string()));
+            Ok(())
         }
     }
 }
