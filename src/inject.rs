@@ -225,9 +225,11 @@ where
         }
         self.ensure_target_is_still_focused()?;
 
-        let erase_count = self.inserted_text.chars().count();
+        let prefix_bytes = common_prefix_byte_len(&self.inserted_text, text);
+        let erase_count = self.inserted_text[prefix_bytes..].chars().count();
+        let text_suffix = &text[prefix_bytes..];
         self.injector.erase_chars(erase_count)?;
-        self.injector.inject_text(text)?;
+        self.injector.inject_text(text_suffix)?;
         self.inserted_text = text.to_string();
         Ok(true)
     }
@@ -265,11 +267,138 @@ where
     }
 }
 
+fn common_prefix_byte_len(left: &str, right: &str) -> usize {
+    let mut prefix_bytes = 0;
+    for (left_ch, right_ch) in left.chars().zip(right.chars()) {
+        if left_ch != right_ch {
+            break;
+        }
+        prefix_bytes += left_ch.len_utf8();
+    }
+    prefix_bytes
+}
+
 pub fn normalize_transcript_for_injection(transcript: &str) -> Option<String> {
     let trimmed = transcript.trim();
     if trimmed.is_empty() {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    #[test]
+    fn speculative_replacement_appends_shared_prefix_without_backspace() {
+        let injector = FakeInjector::default();
+        let operations = injector.operations.clone();
+        let mut session = SpeculativeTextSession::start(injector).unwrap();
+
+        session.replace_text("hel").unwrap();
+        session.replace_text("hello win").unwrap();
+        session.replace_text("hello window").unwrap();
+
+        assert_eq!(
+            *operations.lock().unwrap(),
+            vec![
+                InjectOperation::Type("hel".to_string()),
+                InjectOperation::Type("lo win".to_string()),
+                InjectOperation::Type("dow".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn speculative_replacement_backspaces_only_changed_tail() {
+        let injector = FakeInjector::default();
+        let operations = injector.operations.clone();
+        let mut session = SpeculativeTextSession::start(injector).unwrap();
+
+        session.replace_text("hello win").unwrap();
+        session.replace_text("hello world").unwrap();
+
+        assert_eq!(
+            *operations.lock().unwrap(),
+            vec![
+                InjectOperation::Type("hello win".to_string()),
+                InjectOperation::Backspace(2),
+                InjectOperation::Type("orld".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn speculative_replacement_can_shrink_text() {
+        let injector = FakeInjector::default();
+        let operations = injector.operations.clone();
+        let mut session = SpeculativeTextSession::start(injector).unwrap();
+
+        session.replace_text("hello world").unwrap();
+        session.replace_text("hello").unwrap();
+
+        assert_eq!(
+            *operations.lock().unwrap(),
+            vec![
+                InjectOperation::Type("hello world".to_string()),
+                InjectOperation::Backspace(6),
+            ]
+        );
+    }
+
+    #[test]
+    fn speculative_replacement_counts_unicode_tail_chars() {
+        let injector = FakeInjector::default();
+        let operations = injector.operations.clone();
+        let mut session = SpeculativeTextSession::start(injector).unwrap();
+
+        session.replace_text("héllø win").unwrap();
+        session.replace_text("héllø world").unwrap();
+
+        assert_eq!(
+            *operations.lock().unwrap(),
+            vec![
+                InjectOperation::Type("héllø win".to_string()),
+                InjectOperation::Backspace(2),
+                InjectOperation::Type("orld".to_string()),
+            ]
+        );
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum InjectOperation {
+        Type(String),
+        Backspace(usize),
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeInjector {
+        operations: Arc<Mutex<Vec<InjectOperation>>>,
+    }
+
+    impl TextInjector for FakeInjector {
+        fn inject_text(&self, text: &str) -> anyhow::Result<()> {
+            if !text.is_empty() {
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(InjectOperation::Type(text.to_string()));
+            }
+            Ok(())
+        }
+
+        fn erase_chars(&self, count: usize) -> anyhow::Result<()> {
+            if count > 0 {
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(InjectOperation::Backspace(count));
+            }
+            Ok(())
+        }
     }
 }

@@ -49,10 +49,8 @@ async fn streaming_hotkey_replaces_partial_text_with_final_text() {
         *operations.lock().unwrap(),
         vec![
             InjectOperation::Type("hel".to_string()),
-            InjectOperation::Backspace(3),
-            InjectOperation::Type("hello win".to_string()),
-            InjectOperation::Backspace(9),
-            InjectOperation::Type("hello window".to_string()),
+            InjectOperation::Type("lo win".to_string()),
+            InjectOperation::Type("dow".to_string()),
         ]
     );
     assert_eq!(
