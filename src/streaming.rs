@@ -194,6 +194,7 @@ where
 
         let partial_task = tokio::spawn(consume_live_updates(
             live_session.updates,
+            self.transcript_notifier.clone(),
             self.error_notifier.clone(),
             text_session,
             self.inline_partials,
@@ -273,20 +274,20 @@ where
     }
 
     fn notify_transcript(&self, notify: impl FnOnce(&V) -> anyhow::Result<()>) {
-        if let Err(error) = notify(&self.transcript_notifier) {
-            eprintln!("speaches-scribe transcript notification failed: {error:#}");
-        }
+        notify_transcript(&self.transcript_notifier, notify);
     }
 }
 
-async fn consume_live_updates<I, N>(
+async fn consume_live_updates<I, V, N>(
     mut updates: mpsc::Receiver<LiveTranscriptUpdate>,
+    transcript_notifier: V,
     error_notifier: N,
     mut text_session: SpeculativeTextSession<I>,
     inline_partials: bool,
 ) -> PartialTextSession<I>
 where
     I: TextInjector,
+    V: TranscriptNotifier,
     N: ErrorNotifier,
 {
     let mut latest_partial = None;
@@ -294,15 +295,24 @@ where
         let Some(transcript) = normalize_transcript_for_injection(&update.transcript) else {
             continue;
         };
+        if latest_partial.as_deref() == Some(transcript.as_str()) {
+            continue;
+        }
         latest_partial = Some(transcript.clone());
+        let mut displayed_inline = false;
         if inline_partials {
             match text_session.replace_text(&transcript) {
-                Ok(_) => {}
+                Ok(changed) => displayed_inline = changed,
                 Err(error) => {
                     notify_failure(&error_notifier, "Partial text replacement failed", &error);
                     break;
                 }
             }
+        }
+        if displayed_inline || !inline_partials {
+            notify_transcript(&transcript_notifier, |notifier| {
+                notifier.notify_partial(&transcript)
+            });
         }
     }
     PartialTextSession {
@@ -320,6 +330,15 @@ where
     partial_task
         .await
         .map_err(|error| anyhow::anyhow!("partial transcript task failed: {error:#}"))
+}
+
+fn notify_transcript<V>(notifier: &V, notify: impl FnOnce(&V) -> anyhow::Result<()>)
+where
+    V: TranscriptNotifier,
+{
+    if let Err(error) = notify(notifier) {
+        eprintln!("speaches-scribe transcript notification failed: {error:#}");
+    }
 }
 
 fn notify_failure<N>(notifier: &N, stage: &str, error: &anyhow::Error)

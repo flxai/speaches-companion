@@ -13,7 +13,7 @@ use speaches_scribe::daemon::run_daemon;
 use speaches_scribe::inject::{LibXdoTextInjector, TextInjector};
 use speaches_scribe::ipc::{default_socket_path, send_command, IpcCommand};
 use speaches_scribe::notification::{
-    DesktopErrorNotifier, ErrorNotifier, NoopTranscriptNotifier, HOTKEY_ERROR_SUMMARY,
+    DesktopErrorNotifier, DesktopTranscriptNotifier, ErrorNotifier, HOTKEY_ERROR_SUMMARY,
     READ_ALOUD_ERROR_SUMMARY,
 };
 use speaches_scribe::phase::PhaseResult;
@@ -260,7 +260,7 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     let controller = StreamingDictationController::new_with_notifiers(
         transcriber,
         injector,
-        NoopTranscriptNotifier,
+        DesktopTranscriptNotifier,
         DesktopErrorNotifier,
     )
     .with_listening_marker(daemon_settings.listening_marker)

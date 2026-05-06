@@ -59,6 +59,8 @@ async fn streaming_hotkey_replaces_partial_text_with_final_text() {
         *transcript_events.lock().unwrap(),
         vec![
             TranscriptNotice::Listening,
+            TranscriptNotice::Partial("hel".to_string()),
+            TranscriptNotice::Partial("hello win".to_string()),
             TranscriptNotice::Final("hello window".to_string()),
         ]
     );
@@ -392,6 +394,7 @@ async fn duplicate_streaming_partials_are_ignored() {
         *transcript_events.lock().unwrap(),
         vec![
             TranscriptNotice::Listening,
+            TranscriptNotice::Partial("hello".to_string()),
             TranscriptNotice::Final("hello".to_string()),
         ]
     );
