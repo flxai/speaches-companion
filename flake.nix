@@ -23,6 +23,7 @@
         cargoLock.lockFile = ./Cargo.lock;
         buildInputs = [
           pkgs.xdotool
+          pkgs.libx11
         ];
 
         meta = with lib; {
@@ -163,8 +164,8 @@
           xdotool
         ];
         shellHook = ''
-          export LIBRARY_PATH="${lib.makeLibraryPath [pkgs.xdotool]}''${LIBRARY_PATH:+:''${LIBRARY_PATH}}"
-          export LD_LIBRARY_PATH="${lib.makeLibraryPath [pkgs.xdotool]}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
+          export LIBRARY_PATH="${lib.makeLibraryPath [pkgs.xdotool pkgs.libx11]}''${LIBRARY_PATH:+:''${LIBRARY_PATH}}"
+          export LD_LIBRARY_PATH="${lib.makeLibraryPath [pkgs.xdotool pkgs.libx11]}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
         '';
       };
 
