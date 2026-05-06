@@ -13,9 +13,10 @@ pub const DEFAULT_MODEL: &str = "Systran/faster-whisper-large-v3";
 pub const DEFAULT_TTS_MODEL: &str = "tts-1";
 pub const DEFAULT_TTS_PLAYER: &str = "pw-play";
 pub const DEFAULT_TTS_RESPONSE_FORMAT: &str = "wav";
+pub const DEFAULT_TTS_SPEED: f32 = 1.0;
 pub const DEFAULT_TTS_VOICE: &str = "en_US-lessac-medium";
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct FileConfig {
     #[serde(default)]
     pub speaches: SpeachesFileConfig,
@@ -38,10 +39,11 @@ pub struct SttFileConfig {
     pub language: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct TtsFileConfig {
     pub model: Option<String>,
     pub voice: Option<String>,
+    pub speed: Option<f32>,
     pub response_format: Option<String>,
     pub player: Option<String>,
     #[serde(default)]
@@ -60,7 +62,7 @@ pub struct DictationFileConfig {
     pub preroll_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LoadedFileConfig {
     pub path: PathBuf,
     pub config: FileConfig,
@@ -75,11 +77,12 @@ pub struct DictateLiveConfig {
     pub trace_path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TtsConfig {
     pub base_url: String,
     pub model: String,
     pub voice: String,
+    pub speed: f32,
     pub response_format: String,
     pub player: String,
     pub player_args: Vec<String>,
@@ -100,23 +103,26 @@ pub struct ConfigInput {
     pub file_language: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TtsConfigInput {
     pub cli_base_url: Option<String>,
     pub cli_model: Option<String>,
     pub cli_voice: Option<String>,
+    pub cli_speed: Option<f32>,
     pub cli_response_format: Option<String>,
     pub cli_player: Option<String>,
     pub cli_player_args: Vec<String>,
     pub env_base_url: Option<String>,
     pub env_model: Option<String>,
     pub env_voice: Option<String>,
+    pub env_speed: Option<f32>,
     pub env_response_format: Option<String>,
     pub env_player: Option<String>,
     pub env_player_args: Option<Vec<String>>,
     pub file_base_url: Option<String>,
     pub file_model: Option<String>,
     pub file_voice: Option<String>,
+    pub file_speed: Option<f32>,
     pub file_response_format: Option<String>,
     pub file_player: Option<String>,
     pub file_player_args: Vec<String>,
@@ -172,6 +178,7 @@ pub fn resolve_tts_config(input: TtsConfigInput) -> TtsConfig {
             input.file_voice,
             DEFAULT_TTS_VOICE,
         ),
+        speed: choose_speed(input.cli_speed, input.env_speed, input.file_speed),
         response_format: choose(
             input.cli_response_format,
             input.env_response_format,
@@ -285,6 +292,13 @@ fn choose(cli: Option<String>, env: Option<String>, file: Option<String>, defaul
         .or_else(|| env.and_then(non_empty_string))
         .or_else(|| file.and_then(non_empty_string))
         .unwrap_or_else(|| default.to_string())
+}
+
+fn choose_speed(cli: Option<f32>, env: Option<f32>, file: Option<f32>) -> f32 {
+    cli.or(env)
+        .or(file)
+        .filter(|speed| speed.is_finite() && *speed > 0.0)
+        .unwrap_or(DEFAULT_TTS_SPEED)
 }
 
 fn choose_vec(cli: Vec<String>, env: Option<Vec<String>>, file: Vec<String>) -> Vec<String> {

@@ -131,6 +131,8 @@ struct ReadAloudArgs {
     model: Option<String>,
     #[arg(long)]
     voice: Option<String>,
+    #[arg(long, value_parser = parse_tts_speed)]
+    speed: Option<f32>,
     #[arg(long)]
     response_format: Option<String>,
     #[arg(long)]
@@ -411,15 +413,16 @@ where
         Ok(file_config) => file_config,
         Err(exit_code) => return exit_code,
     };
-    let config = resolve_tts_config(tts_config_input(
-        args.base_url,
-        args.model,
-        args.voice,
-        args.response_format,
-        args.player,
-        args.player_args,
-        &file_config,
-    ));
+    let cli_tts_config = TtsCliConfigInput {
+        base_url: args.base_url,
+        model: args.model,
+        voice: args.voice,
+        speed: args.speed,
+        response_format: args.response_format,
+        player: args.player,
+        player_args: args.player_args,
+    };
+    let config = resolve_tts_config(tts_config_input(cli_tts_config, &file_config));
     let result = read_aloud(args.text, config).await;
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -439,6 +442,7 @@ async fn read_aloud(text: Option<String>, config: TtsConfig) -> anyhow::Result<(
     let options = SpeechOptions {
         model: config.model,
         voice: config.voice,
+        speed: config.speed,
         response_format: config.response_format.clone(),
     };
     let audio = synthesize_speech(&config.base_url, &text, &options).await?;
@@ -480,6 +484,21 @@ fn env_args_or(primary: &str, fallback: &str) -> Option<Vec<String>> {
         .filter(|args| !args.is_empty())
 }
 
+fn env_speed_or(primary: &str, fallback: &str) -> Option<f32> {
+    env_or(primary, fallback).and_then(|value| parse_tts_speed(&value).ok())
+}
+
+fn parse_tts_speed(value: &str) -> Result<f32, String> {
+    let speed = value
+        .parse::<f32>()
+        .map_err(|error| format!("invalid TTS speed {value:?}: {error}"))?;
+    if speed.is_finite() && speed > 0.0 {
+        Ok(speed)
+    } else {
+        Err("TTS speed must be a positive finite number".to_string())
+    }
+}
+
 fn load_command_file_config(config_path: Option<PathBuf>) -> Result<FileConfig, ExitCode> {
     load_file_config(config_path)
         .map(|loaded| loaded.config)
@@ -511,25 +530,29 @@ fn stt_config_input(
     }
 }
 
-fn tts_config_input(
-    cli_base_url: Option<String>,
-    cli_model: Option<String>,
-    cli_voice: Option<String>,
-    cli_response_format: Option<String>,
-    cli_player: Option<String>,
-    cli_player_args: Vec<String>,
-    file_config: &FileConfig,
-) -> TtsConfigInput {
+struct TtsCliConfigInput {
+    base_url: Option<String>,
+    model: Option<String>,
+    voice: Option<String>,
+    speed: Option<f32>,
+    response_format: Option<String>,
+    player: Option<String>,
+    player_args: Vec<String>,
+}
+
+fn tts_config_input(cli: TtsCliConfigInput, file_config: &FileConfig) -> TtsConfigInput {
     TtsConfigInput {
-        cli_base_url,
-        cli_model,
-        cli_voice,
-        cli_response_format,
-        cli_player,
-        cli_player_args,
+        cli_base_url: cli.base_url,
+        cli_model: cli.model,
+        cli_voice: cli.voice,
+        cli_speed: cli.speed,
+        cli_response_format: cli.response_format,
+        cli_player: cli.player,
+        cli_player_args: cli.player_args,
         env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
         env_model: env_or("SPEACHES_SCRIBE_TTS_MODEL", "SPEACHES_TTS_MODEL"),
         env_voice: env_or("SPEACHES_SCRIBE_TTS_VOICE", "SPEACHES_TTS_VOICE"),
+        env_speed: env_speed_or("SPEACHES_SCRIBE_TTS_SPEED", "SPEACHES_TTS_SPEED"),
         env_response_format: env_or(
             "SPEACHES_SCRIBE_TTS_RESPONSE_FORMAT",
             "SPEACHES_TTS_RESPONSE_FORMAT",
@@ -542,6 +565,7 @@ fn tts_config_input(
         file_base_url: file_config.speaches.base_url.clone(),
         file_model: file_config.tts.model.clone(),
         file_voice: file_config.tts.voice.clone(),
+        file_speed: file_config.tts.speed,
         file_response_format: file_config.tts.response_format.clone(),
         file_player: file_config.tts.player.clone(),
         file_player_args: file_config.tts.player_args.clone(),
@@ -814,6 +838,8 @@ mod tests {
             "tts-1",
             "--voice",
             "lessac",
+            "--speed",
+            "1.2",
             "--response-format",
             "wav",
             "--player",
@@ -829,6 +855,7 @@ mod tests {
                 assert_eq!(args.text.as_deref(), Some("read this"));
                 assert_eq!(args.model.as_deref(), Some("tts-1"));
                 assert_eq!(args.voice.as_deref(), Some("lessac"));
+                assert_eq!(args.speed, Some(1.2));
                 assert_eq!(args.response_format.as_deref(), Some("wav"));
                 assert_eq!(args.player.as_deref(), Some("pw-play"));
                 assert_eq!(args.player_args, ["--raw", "--rate", "24000"]);

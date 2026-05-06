@@ -55,6 +55,7 @@ language = "de"
 [tts]
 model = "speaches-ai/Kokoro-82M-v1.0-ONNX"
 voice = "af_heart"
+speed = 1.2
 response_format = "pcm"
 player = "pw-play"
 player_args = ["--raw", "--rate", "24000", "--channels", "1", "--format", "s16"]
@@ -81,7 +82,8 @@ Read-aloud uses Speaches' OpenAI-compatible `/v1/audio/speech` endpoint. Without
 then plays the returned audio with `pw-play`. Configure TTS with
 `SPEACHES_SCRIBE_TTS_MODEL`, `SPEACHES_SCRIBE_TTS_VOICE`, and
 `SPEACHES_SCRIBE_TTS_RESPONSE_FORMAT`, or the matching TOML and CLI values.
-Use repeated `--player-arg` flags or `tts.player_args` when the selected
+Use `--speed`, `SPEACHES_SCRIBE_TTS_SPEED`, or `tts.speed` to adjust speech
+rate. Use repeated `--player-arg` flags or `tts.player_args` when the selected
 response format needs player-specific options, for example raw PCM playback.
 
 The daemon uses rolling HTTP dictation: while the hotkey is held, audio is

@@ -13,10 +13,11 @@ use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 use url::Url;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpeechOptions {
     pub model: String,
     pub voice: String,
+    pub speed: f32,
     pub response_format: String,
 }
 
@@ -25,6 +26,7 @@ struct SpeechRequest<'a> {
     input: &'a str,
     model: &'a str,
     voice: &'a str,
+    speed: f32,
     response_format: &'a str,
 }
 
@@ -57,6 +59,7 @@ pub async fn synthesize_speech(
             input: &input,
             model: &options.model,
             voice: &options.voice,
+            speed: options.speed,
             response_format: &options.response_format,
         })
         .send()

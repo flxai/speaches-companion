@@ -5,7 +5,7 @@ use speaches_scribe::config::{
     default_config_path_with_env, load_file_config_at, realtime_ws_url, resolve_config,
     resolve_config_path_with_env, resolve_tts_config, ConfigInput, TtsConfigInput,
     DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_TTS_MODEL, DEFAULT_TTS_PLAYER,
-    DEFAULT_TTS_RESPONSE_FORMAT, DEFAULT_TTS_VOICE,
+    DEFAULT_TTS_RESPONSE_FORMAT, DEFAULT_TTS_SPEED, DEFAULT_TTS_VOICE,
 };
 use tempfile::tempdir;
 
@@ -80,6 +80,7 @@ fn tts_defaults_use_speaches_audio_speech_values() {
     assert_eq!(config.base_url, DEFAULT_BASE_URL);
     assert_eq!(config.model, DEFAULT_TTS_MODEL);
     assert_eq!(config.voice, DEFAULT_TTS_VOICE);
+    assert_eq!(config.speed, DEFAULT_TTS_SPEED);
     assert_eq!(config.response_format, DEFAULT_TTS_RESPONSE_FORMAT);
     assert_eq!(config.player, DEFAULT_TTS_PLAYER);
     assert!(config.player_args.is_empty());
@@ -91,18 +92,21 @@ fn tts_cli_values_override_environment_values() {
         cli_base_url: Some("http://cli.example:9000".to_string()),
         cli_model: Some("cli-tts".to_string()),
         cli_voice: Some("cli-voice".to_string()),
+        cli_speed: Some(1.2),
         cli_response_format: Some("mp3".to_string()),
         cli_player: Some("cli-player".to_string()),
         cli_player_args: vec!["--cli".to_string()],
         env_base_url: Some("http://env.example:8000".to_string()),
         env_model: Some("env-tts".to_string()),
         env_voice: Some("env-voice".to_string()),
+        env_speed: Some(0.9),
         env_response_format: Some("wav".to_string()),
         env_player: Some("env-player".to_string()),
         env_player_args: Some(vec!["--env".to_string()]),
         file_base_url: Some("http://file.example:8000".to_string()),
         file_model: Some("file-tts".to_string()),
         file_voice: Some("file-voice".to_string()),
+        file_speed: Some(1.1),
         file_response_format: Some("opus".to_string()),
         file_player: Some("file-player".to_string()),
         file_player_args: vec!["--file".to_string()],
@@ -111,6 +115,7 @@ fn tts_cli_values_override_environment_values() {
     assert_eq!(config.base_url, "http://cli.example:9000");
     assert_eq!(config.model, "cli-tts");
     assert_eq!(config.voice, "cli-voice");
+    assert_eq!(config.speed, 1.2);
     assert_eq!(config.response_format, "mp3");
     assert_eq!(config.player, "cli-player");
     assert_eq!(config.player_args, ["--cli"]);
@@ -122,6 +127,7 @@ fn file_tts_values_override_defaults() {
         file_base_url: Some("http://file.example:8000".to_string()),
         file_model: Some("file-tts".to_string()),
         file_voice: Some("file-voice".to_string()),
+        file_speed: Some(1.15),
         file_response_format: Some("opus".to_string()),
         file_player: Some("file-player".to_string()),
         file_player_args: vec![
@@ -135,6 +141,7 @@ fn file_tts_values_override_defaults() {
     assert_eq!(config.base_url, "http://file.example:8000");
     assert_eq!(config.model, "file-tts");
     assert_eq!(config.voice, "file-voice");
+    assert_eq!(config.speed, 1.15);
     assert_eq!(config.response_format, "opus");
     assert_eq!(config.player, "file-player");
     assert_eq!(config.player_args, ["--raw", "--rate", "24000"]);
@@ -157,6 +164,7 @@ language = "de"
 [tts]
 model = "tts-model"
 voice = "lessac"
+speed = 1.2
 response_format = "wav"
 player = "pw-play"
 player_args = ["--raw", "--rate", "24000"]
@@ -184,6 +192,7 @@ preroll_ms = 1000
     assert_eq!(config.stt.language.as_deref(), Some("de"));
     assert_eq!(config.tts.model.as_deref(), Some("tts-model"));
     assert_eq!(config.tts.voice.as_deref(), Some("lessac"));
+    assert_eq!(config.tts.speed, Some(1.2));
     assert_eq!(config.tts.response_format.as_deref(), Some("wav"));
     assert_eq!(config.tts.player.as_deref(), Some("pw-play"));
     assert_eq!(config.tts.player_args, ["--raw", "--rate", "24000"]);

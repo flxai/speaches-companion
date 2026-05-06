@@ -32,6 +32,7 @@ async fn synthesize_speech_posts_openai_compatible_json() {
                 "input": "hello window",
                 "model": "tts-1",
                 "voice": "lessac",
+                "speed": 1.2,
                 "response_format": "wav",
             }));
         then.status(200)
@@ -41,6 +42,7 @@ async fn synthesize_speech_posts_openai_compatible_json() {
     let options = SpeechOptions {
         model: "tts-1".to_string(),
         voice: "lessac".to_string(),
+        speed: 1.2,
         response_format: "wav".to_string(),
     };
 
