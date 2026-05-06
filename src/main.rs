@@ -17,8 +17,10 @@ use speaches_scribe::notification::{
     READ_ALOUD_ERROR_SUMMARY,
 };
 use speaches_scribe::phase::PhaseResult;
-use speaches_scribe::realtime::run_dictate_live;
-use speaches_scribe::streaming::{RollingHttpTranscriber, StreamingDictationController};
+use speaches_scribe::realtime::{run_dictate_live, RealtimeTranscriber};
+use speaches_scribe::streaming::{
+    LiveTranscriber, RollingHttpTranscriber, StreamingDictationController,
+};
 use speaches_scribe::stt::{transcribe_file, ResponseFormat, TranscribeOptions};
 use speaches_scribe::tts::{
     normalize_read_aloud_text, play_audio_file, selected_or_clipboard_text, synthesize_speech,
@@ -70,6 +72,10 @@ struct DaemonArgs {
     stream_response: bool,
     #[arg(long)]
     no_stream_response: bool,
+    #[arg(long, conflicts_with = "no_realtime_partials")]
+    realtime_partials: bool,
+    #[arg(long)]
+    no_realtime_partials: bool,
     #[arg(long)]
     listening_marker: Option<String>,
     #[arg(long)]
@@ -226,36 +232,66 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
         args.language,
         &file_config,
     ));
-    let transcriber = RollingHttpTranscriber::new(
-        config.base_url,
-        TranscribeOptions {
-            model: config.model,
-            response_format: ResponseFormat::Text,
-            language: config.language,
-            prompt: None,
-            hotwords: None,
-            without_timestamps: true,
-            stream: daemon_settings.stream_response,
-        },
-    )
-    .with_partial_interval(Duration::from_millis(daemon_settings.partial_interval_ms))
-    .with_partial_min_duration(Duration::from_millis(
-        daemon_settings.partial_min_duration_ms,
-    ))
-    .with_leading_silence(Duration::from_millis(daemon_settings.leading_silence_ms))
-    .with_preroll(Duration::from_millis(daemon_settings.preroll_ms))
-    .with_transcript_dir(daemon_settings.transcript_dir);
-    eprintln!("speaches-scribe starting continuous audio capture...");
-    if let Err(error) = transcriber.prepare_capture().await {
-        eprintln!("speaches-scribe failed to start continuous audio capture: {error:#}");
-        return ExitCode::from(1);
+    if daemon_settings.realtime_partials {
+        let transcriber = RealtimeTranscriber::new(config.base_url, config.model, config.language)
+            .with_preroll(Duration::from_millis(daemon_settings.preroll_ms));
+        eprintln!("speaches-scribe starting continuous audio capture...");
+        if let Err(error) = transcriber.prepare_capture().await {
+            eprintln!("speaches-scribe failed to start continuous audio capture: {error:#}");
+            return ExitCode::from(1);
+        }
+        eprintln!("speaches-scribe continuous audio capture ready");
+        eprintln!("speaches-scribe warming realtime transcription backend...");
+        match transcriber.warm_up().await {
+            Ok(()) => eprintln!("speaches-scribe realtime transcription backend ready"),
+            Err(error) => {
+                eprintln!("speaches-scribe realtime transcription warmup failed: {error:#}")
+            }
+        }
+        run_streaming_daemon(socket_path, daemon_settings, transcriber).await
+    } else {
+        let transcriber = RollingHttpTranscriber::new(
+            config.base_url,
+            TranscribeOptions {
+                model: config.model,
+                response_format: ResponseFormat::Text,
+                language: config.language,
+                prompt: None,
+                hotwords: None,
+                without_timestamps: true,
+                stream: daemon_settings.stream_response,
+            },
+        )
+        .with_partial_interval(Duration::from_millis(daemon_settings.partial_interval_ms))
+        .with_partial_min_duration(Duration::from_millis(
+            daemon_settings.partial_min_duration_ms,
+        ))
+        .with_leading_silence(Duration::from_millis(daemon_settings.leading_silence_ms))
+        .with_preroll(Duration::from_millis(daemon_settings.preroll_ms))
+        .with_transcript_dir(daemon_settings.transcript_dir.clone());
+        eprintln!("speaches-scribe starting continuous audio capture...");
+        if let Err(error) = transcriber.prepare_capture().await {
+            eprintln!("speaches-scribe failed to start continuous audio capture: {error:#}");
+            return ExitCode::from(1);
+        }
+        eprintln!("speaches-scribe continuous audio capture ready");
+        eprintln!("speaches-scribe warming transcription backend...");
+        match transcriber.warm_up_transcription().await {
+            Ok(()) => eprintln!("speaches-scribe transcription backend ready"),
+            Err(error) => eprintln!("speaches-scribe transcription warmup failed: {error:#}"),
+        }
+        run_streaming_daemon(socket_path, daemon_settings, transcriber).await
     }
-    eprintln!("speaches-scribe continuous audio capture ready");
-    eprintln!("speaches-scribe warming transcription backend...");
-    match transcriber.warm_up_transcription().await {
-        Ok(()) => eprintln!("speaches-scribe transcription backend ready"),
-        Err(error) => eprintln!("speaches-scribe transcription warmup failed: {error:#}"),
-    }
+}
+
+async fn run_streaming_daemon<L>(
+    socket_path: PathBuf,
+    daemon_settings: DaemonSettings,
+    transcriber: L,
+) -> ExitCode
+where
+    L: LiveTranscriber + 'static,
+{
     let injector = LibXdoTextInjector::default();
     let controller = StreamingDictationController::new_with_notifiers(
         transcriber,
@@ -283,6 +319,7 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
 struct DaemonSettings {
     transcript_dir: Option<PathBuf>,
     stream_response: bool,
+    realtime_partials: bool,
     listening_marker: Option<String>,
     inline_partials: bool,
     partial_interval_ms: u64,
@@ -298,6 +335,7 @@ fn resolve_daemon_settings(args: &DaemonArgs, file_config: &FileConfig) -> Daemo
             .clone()
             .or_else(|| file_config.dictation.transcript_dir.clone()),
         stream_response: resolve_stream_response(args, file_config),
+        realtime_partials: resolve_realtime_partials(args, file_config),
         listening_marker: resolve_listening_marker(args, file_config),
         inline_partials: resolve_inline_partials(args, file_config),
         partial_interval_ms: args
@@ -316,6 +354,16 @@ fn resolve_daemon_settings(args: &DaemonArgs, file_config: &FileConfig) -> Daemo
             .preroll_ms
             .or(file_config.dictation.preroll_ms)
             .unwrap_or(DEFAULT_PREROLL_MS),
+    }
+}
+
+fn resolve_realtime_partials(args: &DaemonArgs, file_config: &FileConfig) -> bool {
+    if args.realtime_partials {
+        true
+    } else if args.no_realtime_partials {
+        false
+    } else {
+        file_config.dictation.realtime_partials.unwrap_or(false)
     }
 }
 
@@ -719,6 +767,7 @@ mod tests {
         let args = parse_daemon_args(["speaches-scribe", "daemon"]);
         let settings = resolve_daemon_settings(&args, &FileConfig::default());
 
+        assert!(!settings.realtime_partials);
         assert_eq!(
             settings.listening_marker,
             Some(DEFAULT_LISTENING_MARKER.to_string())
@@ -745,6 +794,7 @@ mod tests {
             dictation: DictationFileConfig {
                 transcript_dir: Some(PathBuf::from("transcripts")),
                 stream_response: Some(true),
+                realtime_partials: Some(true),
                 listening_marker: Some("...".to_string()),
                 inline_partials: Some(false),
                 partial_interval_ms: Some(750),
@@ -759,6 +809,7 @@ mod tests {
 
         assert_eq!(settings.transcript_dir, Some(PathBuf::from("transcripts")));
         assert!(settings.stream_response);
+        assert!(settings.realtime_partials);
         assert_eq!(settings.listening_marker, Some("...".to_string()));
         assert!(!settings.inline_partials);
         assert_eq!(settings.partial_interval_ms, 750);

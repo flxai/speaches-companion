@@ -63,6 +63,7 @@ player_args = ["--raw", "--rate", "24000", "--channels", "1", "--format", "s16"]
 [dictation]
 transcript_dir = "target/speaches-scribe-transcripts"
 stream_response = false
+realtime_partials = false
 listening_marker = "💬"
 inline_partials = true
 partial_interval_ms = 1250
@@ -86,11 +87,13 @@ Use `--speed`, `SPEACHES_SCRIBE_TTS_SPEED`, or `tts.speed` to adjust speech
 rate. Use repeated `--player-arg` flags or `tts.player_args` when the selected
 response format needs player-specific options, for example raw PCM playback.
 
-The daemon uses rolling HTTP dictation: while the hotkey is held, audio is
-recorded and partial transcripts are collected. On release, the full recording
-is sent to Speaches, transcribed, and injected into the focused X11 window. If
-focus changes during a recording, `speaches-scribe` stops editing the target
-window instead of sending Backspaces to the wrong place.
+The daemon defaults to rolling HTTP dictation: while the hotkey is held, audio
+is recorded and partial transcripts are collected. On release, the full
+recording is sent to Speaches, transcribed, and injected into the focused X11
+window. Set `realtime_partials = true` to use Speaches' realtime WebSocket path
+for live partials instead of repeated HTTP snapshots. If focus changes during a
+recording, `speaches-scribe` stops editing the target window instead of sending
+Backspaces to the wrong place.
 
 On startup the daemon starts continuous `pw-record` capture before it accepts
 hotkey-driven dictation. If that capture cannot start, daemon startup fails

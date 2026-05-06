@@ -54,6 +54,7 @@ pub struct TtsFileConfig {
 pub struct DictationFileConfig {
     pub transcript_dir: Option<PathBuf>,
     pub stream_response: Option<bool>,
+    pub realtime_partials: Option<bool>,
     pub listening_marker: Option<String>,
     pub inline_partials: Option<bool>,
     pub partial_interval_ms: Option<u64>,

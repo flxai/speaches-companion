@@ -172,6 +172,7 @@ player_args = ["--raw", "--rate", "24000"]
 [dictation]
 transcript_dir = "transcripts"
 stream_response = true
+realtime_partials = true
 listening_marker = "..."
 inline_partials = false
 partial_interval_ms = 750
@@ -201,6 +202,7 @@ preroll_ms = 1000
         Some(Path::new("transcripts"))
     );
     assert_eq!(config.dictation.stream_response, Some(true));
+    assert_eq!(config.dictation.realtime_partials, Some(true));
     assert_eq!(config.dictation.listening_marker.as_deref(), Some("..."));
     assert_eq!(config.dictation.inline_partials, Some(false));
     assert_eq!(config.dictation.partial_interval_ms, Some(750));
