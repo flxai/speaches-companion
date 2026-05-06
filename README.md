@@ -37,17 +37,49 @@ nix run .#hotkey -- up
 nix run .#read-aloud -- --text "hello from Speaches"
 ```
 
-`speaches-scribe` expects Speaches to be reachable at `SPEACHES_BASE_URL`
-or through `--base-url`. Choose the Speaches model with
-`SPEACHES_SCRIBE_MODEL` or `--model`, and optionally set
-`SPEACHES_SCRIBE_LANGUAGE` or `--language`.
+`speaches-scribe` reads configuration from
+`$XDG_CONFIG_HOME/speaches-scribe/config.toml`, falling back to
+`~/.config/speaches-scribe/config.toml`. Use `--config` on `daemon`,
+`read-aloud`, `transcribe`, `smoke`, and `dictate-live`, or set
+`SPEACHES_SCRIBE_CONFIG`, to point at another file. Missing config files are
+treated as empty.
+
+```toml
+[speaches]
+base_url = "http://ono.tail:8000"
+
+[stt]
+model = "Systran/faster-whisper-large-v3"
+language = "de"
+
+[tts]
+model = "tts-1"
+voice = "en_US-lessac-medium"
+response_format = "wav"
+player = "pw-play"
+
+[dictation]
+transcript_dir = "target/speaches-scribe-transcripts"
+stream_response = false
+listening_marker = "💬"
+inline_partials = true
+partial_interval_ms = 1250
+partial_min_duration_ms = 0
+leading_silence_ms = 250
+preroll_ms = 750
+```
+
+For compatible existing setups, environment and CLI values still work. The
+resolution order is CLI flags, then environment variables, then TOML, then
+built-in defaults. `SPEACHES_BASE_URL`, `SPEACHES_SCRIBE_MODEL`, and
+`SPEACHES_SCRIBE_LANGUAGE` configure STT; the legacy `SPEACHES_STT_MODEL` is
+still accepted as a model fallback.
 
 Read-aloud uses Speaches' OpenAI-compatible `/v1/audio/speech` endpoint. Without
 `--text`, it reads the X11 primary selection and falls back to the clipboard,
 then plays the returned audio with `pw-play`. Configure TTS with
 `SPEACHES_SCRIBE_TTS_MODEL`, `SPEACHES_SCRIBE_TTS_VOICE`, and
-`SPEACHES_SCRIBE_TTS_RESPONSE_FORMAT`, or the matching `--model`, `--voice`,
-and `--response-format` flags.
+`SPEACHES_SCRIBE_TTS_RESPONSE_FORMAT`, or the matching TOML and CLI values.
 
 The daemon uses rolling HTTP dictation: while the hotkey is held, audio is
 recorded and partial transcripts are collected. On release, the full recording

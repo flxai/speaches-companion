@@ -5,7 +5,10 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use speaches_scribe::audio::{record_wav_with_pw_record, STT_SAMPLE_RATE};
-use speaches_scribe::config::{resolve_config, resolve_tts_config, ConfigInput, TtsConfigInput};
+use speaches_scribe::config::{
+    load_file_config, resolve_config, resolve_tts_config, ConfigInput, FileConfig, TtsConfig,
+    TtsConfigInput,
+};
 use speaches_scribe::daemon::run_daemon;
 use speaches_scribe::inject::{LibXdoTextInjector, TextInjector};
 use speaches_scribe::ipc::{default_socket_path, send_command, IpcCommand};
@@ -23,6 +26,10 @@ use speaches_scribe::tts::{
 };
 
 const DEFAULT_LISTENING_MARKER: &str = "💬";
+const DEFAULT_PARTIAL_INTERVAL_MS: u64 = 1250;
+const DEFAULT_PARTIAL_MIN_DURATION_MS: u64 = 0;
+const DEFAULT_LEADING_SILENCE_MS: u64 = 250;
+const DEFAULT_PREROLL_MS: u64 = 750;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -48,6 +55,8 @@ enum Command {
 #[derive(Debug, Args)]
 struct DaemonArgs {
     #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long)]
     socket_path: Option<PathBuf>,
     #[arg(long)]
     base_url: Option<String>,
@@ -57,8 +66,10 @@ struct DaemonArgs {
     language: Option<String>,
     #[arg(long)]
     transcript_dir: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "no_stream_response")]
     stream_response: bool,
+    #[arg(long)]
+    no_stream_response: bool,
     #[arg(long)]
     listening_marker: Option<String>,
     #[arg(long)]
@@ -67,18 +78,20 @@ struct DaemonArgs {
     inline_partials: bool,
     #[arg(long)]
     no_inline_partials: bool,
-    #[arg(long, default_value = "1250")]
-    partial_interval_ms: u64,
-    #[arg(long, default_value = "0")]
-    partial_min_duration_ms: u64,
-    #[arg(long, default_value = "250")]
-    leading_silence_ms: u64,
-    #[arg(long, default_value = "750")]
-    preroll_ms: u64,
+    #[arg(long)]
+    partial_interval_ms: Option<u64>,
+    #[arg(long)]
+    partial_min_duration_ms: Option<u64>,
+    #[arg(long)]
+    leading_silence_ms: Option<u64>,
+    #[arg(long)]
+    preroll_ms: Option<u64>,
 }
 
 #[derive(Debug, Args)]
 struct DictateLiveArgs {
+    #[arg(long)]
+    config: Option<PathBuf>,
     #[arg(long)]
     base_url: Option<String>,
     #[arg(long)]
@@ -109,6 +122,8 @@ struct InjectArgs {
 #[derive(Debug, Args)]
 struct ReadAloudArgs {
     #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long)]
     text: Option<String>,
     #[arg(long)]
     base_url: Option<String>,
@@ -118,13 +133,15 @@ struct ReadAloudArgs {
     voice: Option<String>,
     #[arg(long)]
     response_format: Option<String>,
-    #[arg(long, default_value = "pw-play")]
-    player: String,
+    #[arg(long)]
+    player: Option<String>,
 }
 
 #[derive(Debug, Args)]
 struct TranscribeArgs {
     audio: PathBuf,
+    #[arg(long)]
+    config: Option<PathBuf>,
     #[arg(long)]
     base_url: Option<String>,
     #[arg(long)]
@@ -145,6 +162,8 @@ struct TranscribeArgs {
 
 #[derive(Debug, Args)]
 struct SmokeArgs {
+    #[arg(long)]
+    config: Option<PathBuf>,
     #[arg(long, default_value = "3")]
     record_seconds: u64,
     #[arg(long, default_value = "target/speaches-scribe-smoke/speaches-mic.wav")]
@@ -185,27 +204,24 @@ async fn main() -> ExitCode {
 }
 
 async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
-    let listening_marker = resolve_listening_marker(&args);
-    let inline_partials = resolve_inline_partials(&args);
-    let transcript_dir = args.transcript_dir.clone();
+    let file_config = match load_command_file_config(args.config.clone()) {
+        Ok(file_config) => file_config,
+        Err(exit_code) => return exit_code,
+    };
+    let daemon_settings = resolve_daemon_settings(&args, &file_config);
     let socket_path = args.socket_path.unwrap_or_else(default_socket_path);
-    if let Some(transcript_dir) = transcript_dir.as_ref() {
+    if let Some(transcript_dir) = daemon_settings.transcript_dir.as_ref() {
         eprintln!(
             "speaches-scribe preserving transcripts in {}",
             transcript_dir.display()
         );
     }
-    let config = resolve_config(ConfigInput {
-        cli_base_url: args.base_url,
-        cli_model: args.model,
-        cli_language: args.language,
-        env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
-        env_model: std::env::var("SPEACHES_SCRIBE_MODEL")
-            .ok()
-            .or_else(|| std::env::var("SPEACHES_STT_MODEL").ok()),
-        env_language: std::env::var("SPEACHES_SCRIBE_LANGUAGE").ok(),
-        ..ConfigInput::default()
-    });
+    let config = resolve_config(stt_config_input(
+        args.base_url,
+        args.model,
+        args.language,
+        &file_config,
+    ));
     let transcriber = RollingHttpTranscriber::new(
         config.base_url,
         TranscribeOptions {
@@ -215,14 +231,16 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
             prompt: None,
             hotwords: None,
             without_timestamps: true,
-            stream: args.stream_response,
+            stream: daemon_settings.stream_response,
         },
     )
-    .with_partial_interval(Duration::from_millis(args.partial_interval_ms))
-    .with_partial_min_duration(Duration::from_millis(args.partial_min_duration_ms))
-    .with_leading_silence(Duration::from_millis(args.leading_silence_ms))
-    .with_preroll(Duration::from_millis(args.preroll_ms))
-    .with_transcript_dir(transcript_dir);
+    .with_partial_interval(Duration::from_millis(daemon_settings.partial_interval_ms))
+    .with_partial_min_duration(Duration::from_millis(
+        daemon_settings.partial_min_duration_ms,
+    ))
+    .with_leading_silence(Duration::from_millis(daemon_settings.leading_silence_ms))
+    .with_preroll(Duration::from_millis(daemon_settings.preroll_ms))
+    .with_transcript_dir(daemon_settings.transcript_dir);
     eprintln!("speaches-scribe starting continuous audio capture...");
     if let Err(error) = transcriber.prepare_capture().await {
         eprintln!("speaches-scribe failed to start continuous audio capture: {error:#}");
@@ -241,8 +259,8 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
         NoopTranscriptNotifier,
         DesktopErrorNotifier,
     )
-    .with_listening_marker(listening_marker)
-    .with_inline_partials(inline_partials);
+    .with_listening_marker(daemon_settings.listening_marker)
+    .with_inline_partials(daemon_settings.inline_partials);
 
     eprintln!(
         "speaches-scribe daemon listening on {}",
@@ -257,20 +275,76 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     }
 }
 
-fn resolve_listening_marker(args: &DaemonArgs) -> Option<String> {
-    if args.no_listening_marker {
-        None
-    } else {
-        Some(
-            args.listening_marker
-                .clone()
-                .unwrap_or_else(|| DEFAULT_LISTENING_MARKER.to_string()),
-        )
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DaemonSettings {
+    transcript_dir: Option<PathBuf>,
+    stream_response: bool,
+    listening_marker: Option<String>,
+    inline_partials: bool,
+    partial_interval_ms: u64,
+    partial_min_duration_ms: u64,
+    leading_silence_ms: u64,
+    preroll_ms: u64,
+}
+
+fn resolve_daemon_settings(args: &DaemonArgs, file_config: &FileConfig) -> DaemonSettings {
+    DaemonSettings {
+        transcript_dir: args
+            .transcript_dir
+            .clone()
+            .or_else(|| file_config.dictation.transcript_dir.clone()),
+        stream_response: resolve_stream_response(args, file_config),
+        listening_marker: resolve_listening_marker(args, file_config),
+        inline_partials: resolve_inline_partials(args, file_config),
+        partial_interval_ms: args
+            .partial_interval_ms
+            .or(file_config.dictation.partial_interval_ms)
+            .unwrap_or(DEFAULT_PARTIAL_INTERVAL_MS),
+        partial_min_duration_ms: args
+            .partial_min_duration_ms
+            .or(file_config.dictation.partial_min_duration_ms)
+            .unwrap_or(DEFAULT_PARTIAL_MIN_DURATION_MS),
+        leading_silence_ms: args
+            .leading_silence_ms
+            .or(file_config.dictation.leading_silence_ms)
+            .unwrap_or(DEFAULT_LEADING_SILENCE_MS),
+        preroll_ms: args
+            .preroll_ms
+            .or(file_config.dictation.preroll_ms)
+            .unwrap_or(DEFAULT_PREROLL_MS),
     }
 }
 
-fn resolve_inline_partials(args: &DaemonArgs) -> bool {
-    args.inline_partials || !args.no_inline_partials
+fn resolve_listening_marker(args: &DaemonArgs, file_config: &FileConfig) -> Option<String> {
+    if args.no_listening_marker {
+        return None;
+    }
+
+    args.listening_marker
+        .clone()
+        .or_else(|| file_config.dictation.listening_marker.clone())
+        .or_else(|| Some(DEFAULT_LISTENING_MARKER.to_string()))
+        .and_then(non_empty_string)
+}
+
+fn resolve_stream_response(args: &DaemonArgs, file_config: &FileConfig) -> bool {
+    if args.stream_response {
+        true
+    } else if args.no_stream_response {
+        false
+    } else {
+        file_config.dictation.stream_response.unwrap_or(false)
+    }
+}
+
+fn resolve_inline_partials(args: &DaemonArgs, file_config: &FileConfig) -> bool {
+    if args.inline_partials {
+        true
+    } else if args.no_inline_partials {
+        false
+    } else {
+        file_config.dictation.inline_partials.unwrap_or(true)
+    }
 }
 
 async fn run_hotkey_command(args: HotkeyArgs) -> ExitCode {
@@ -331,23 +405,19 @@ async fn run_read_aloud_command_with_notifier<N>(args: ReadAloudArgs, notifier: 
 where
     N: ErrorNotifier,
 {
-    let config = resolve_tts_config(TtsConfigInput {
-        cli_base_url: args.base_url,
-        cli_model: args.model,
-        cli_voice: args.voice,
-        cli_response_format: args.response_format,
-        cli_player: None,
-        env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
-        env_model: env_or("SPEACHES_SCRIBE_TTS_MODEL", "SPEACHES_TTS_MODEL"),
-        env_voice: env_or("SPEACHES_SCRIBE_TTS_VOICE", "SPEACHES_TTS_VOICE"),
-        env_response_format: env_or(
-            "SPEACHES_SCRIBE_TTS_RESPONSE_FORMAT",
-            "SPEACHES_TTS_RESPONSE_FORMAT",
-        ),
-        env_player: env_or("SPEACHES_SCRIBE_TTS_PLAYER", "SPEACHES_TTS_PLAYER"),
-        ..TtsConfigInput::default()
-    });
-    let result = read_aloud(args.text, &args.player, config).await;
+    let file_config = match load_command_file_config(args.config.clone()) {
+        Ok(file_config) => file_config,
+        Err(exit_code) => return exit_code,
+    };
+    let config = resolve_tts_config(tts_config_input(
+        args.base_url,
+        args.model,
+        args.voice,
+        args.response_format,
+        args.player,
+        &file_config,
+    ));
+    let result = read_aloud(args.text, config).await;
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -358,11 +428,7 @@ where
     }
 }
 
-async fn read_aloud(
-    text: Option<String>,
-    player: &str,
-    config: speaches_scribe::config::TtsConfig,
-) -> anyhow::Result<()> {
+async fn read_aloud(text: Option<String>, config: TtsConfig) -> anyhow::Result<()> {
     let text = match text {
         Some(text) => normalize_read_aloud_text(&text).context("--text is empty")?,
         None => selected_or_clipboard_text().await?,
@@ -374,7 +440,7 @@ async fn read_aloud(
     };
     let audio = synthesize_speech(&config.base_url, &text, &options).await?;
     let audio_path = write_speech_temp_file(&audio, &config.response_format).await?;
-    let play_result = play_audio_file(&audio_path, player).await;
+    let play_result = play_audio_file(&audio_path, &config.player).await;
     if let Err(error) = tokio::fs::remove_file(&audio_path).await {
         eprintln!(
             "speaches-scribe failed to remove temporary speech audio {}: {error:#}",
@@ -400,20 +466,91 @@ fn env_or(primary: &str, fallback: &str) -> Option<String> {
         .or_else(|| std::env::var(fallback).ok())
 }
 
-async fn run_transcribe_command(args: TranscribeArgs) -> ExitCode {
-    let config = resolve_config(ConfigInput {
-        cli_base_url: args.base_url,
-        cli_model: args.model,
+fn load_command_file_config(config_path: Option<PathBuf>) -> Result<FileConfig, ExitCode> {
+    load_file_config(config_path)
+        .map(|loaded| loaded.config)
+        .map_err(|error| {
+            eprintln!("config failed: {error:#}");
+            ExitCode::from(1)
+        })
+}
+
+fn stt_config_input(
+    cli_base_url: Option<String>,
+    cli_model: Option<String>,
+    cli_language: Option<String>,
+    file_config: &FileConfig,
+) -> ConfigInput {
+    ConfigInput {
+        cli_base_url,
+        cli_model,
+        cli_language,
         env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
         env_model: std::env::var("SPEACHES_SCRIBE_MODEL")
             .ok()
             .or_else(|| std::env::var("SPEACHES_STT_MODEL").ok()),
+        env_language: std::env::var("SPEACHES_SCRIBE_LANGUAGE").ok(),
+        file_base_url: file_config.speaches.base_url.clone(),
+        file_model: file_config.stt.model.clone(),
+        file_language: file_config.stt.language.clone(),
         ..ConfigInput::default()
-    });
+    }
+}
+
+fn tts_config_input(
+    cli_base_url: Option<String>,
+    cli_model: Option<String>,
+    cli_voice: Option<String>,
+    cli_response_format: Option<String>,
+    cli_player: Option<String>,
+    file_config: &FileConfig,
+) -> TtsConfigInput {
+    TtsConfigInput {
+        cli_base_url,
+        cli_model,
+        cli_voice,
+        cli_response_format,
+        cli_player,
+        env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
+        env_model: env_or("SPEACHES_SCRIBE_TTS_MODEL", "SPEACHES_TTS_MODEL"),
+        env_voice: env_or("SPEACHES_SCRIBE_TTS_VOICE", "SPEACHES_TTS_VOICE"),
+        env_response_format: env_or(
+            "SPEACHES_SCRIBE_TTS_RESPONSE_FORMAT",
+            "SPEACHES_TTS_RESPONSE_FORMAT",
+        ),
+        env_player: env_or("SPEACHES_SCRIBE_TTS_PLAYER", "SPEACHES_TTS_PLAYER"),
+        file_base_url: file_config.speaches.base_url.clone(),
+        file_model: file_config.tts.model.clone(),
+        file_voice: file_config.tts.voice.clone(),
+        file_response_format: file_config.tts.response_format.clone(),
+        file_player: file_config.tts.player.clone(),
+    }
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+async fn run_transcribe_command(args: TranscribeArgs) -> ExitCode {
+    let file_config = match load_command_file_config(args.config.clone()) {
+        Ok(file_config) => file_config,
+        Err(exit_code) => return exit_code,
+    };
+    let config = resolve_config(stt_config_input(
+        args.base_url,
+        args.model,
+        args.language.clone(),
+        &file_config,
+    ));
     let options = TranscribeOptions {
         model: config.model,
         response_format: args.response_format,
-        language: args.language,
+        language: config.language,
         prompt: args.prompt,
         hotwords: args.hotwords,
         without_timestamps: !args.with_timestamps,
@@ -448,6 +585,7 @@ async fn run_smoke_command(args: SmokeArgs) -> ExitCode {
 
     let transcribe_args = TranscribeArgs {
         audio: args.record_output,
+        config: args.config,
         base_url: args.base_url,
         model: args.model,
         response_format: args.response_format,
@@ -461,16 +599,14 @@ async fn run_smoke_command(args: SmokeArgs) -> ExitCode {
 }
 
 async fn run_dictate_live_command(args: DictateLiveArgs) -> ExitCode {
+    let file_config = match load_command_file_config(args.config.clone()) {
+        Ok(file_config) => file_config,
+        Err(exit_code) => return exit_code,
+    };
     let config = resolve_config(ConfigInput {
-        cli_base_url: args.base_url,
-        cli_model: args.model,
-        cli_language: args.language,
         cli_duration_seconds: args.duration_seconds,
         cli_trace_path: args.trace_path,
-        env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
-        env_model: std::env::var("SPEACHES_SCRIBE_MODEL").ok(),
-        env_language: std::env::var("SPEACHES_SCRIBE_LANGUAGE").ok(),
-        ..ConfigInput::default()
+        ..stt_config_input(args.base_url, args.model, args.language, &file_config)
     });
 
     match run_dictate_live(config).await {
@@ -500,6 +636,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use speaches_scribe::config::DictationFileConfig;
 
     #[tokio::test]
     async fn hotkey_connection_error_sends_desktop_error_notification() {
@@ -535,37 +672,88 @@ mod tests {
     #[test]
     fn daemon_defaults_insert_marker_and_live_partials() {
         let args = parse_daemon_args(["speaches-scribe", "daemon"]);
+        let settings = resolve_daemon_settings(&args, &FileConfig::default());
 
         assert_eq!(
-            resolve_listening_marker(&args),
+            settings.listening_marker,
             Some(DEFAULT_LISTENING_MARKER.to_string())
         );
-        assert!(resolve_inline_partials(&args));
-        assert_eq!(args.preroll_ms, 750);
+        assert!(settings.inline_partials);
+        assert_eq!(settings.preroll_ms, DEFAULT_PREROLL_MS);
     }
 
     #[test]
     fn daemon_flags_can_disable_marker_and_live_partials() {
         let args = parse_daemon_args(["speaches-scribe", "daemon", "--no-listening-marker"]);
-        assert_eq!(resolve_listening_marker(&args), None);
+        let settings = resolve_daemon_settings(&args, &FileConfig::default());
+        assert_eq!(settings.listening_marker, None);
 
         let args = parse_daemon_args(["speaches-scribe", "daemon", "--no-inline-partials"]);
-        assert!(!resolve_inline_partials(&args));
+        let settings = resolve_daemon_settings(&args, &FileConfig::default());
+        assert!(!settings.inline_partials);
+    }
+
+    #[test]
+    fn daemon_reads_dictation_settings_from_file_config() {
+        let args = parse_daemon_args(["speaches-scribe", "daemon"]);
+        let file_config = FileConfig {
+            dictation: DictationFileConfig {
+                transcript_dir: Some(PathBuf::from("transcripts")),
+                stream_response: Some(true),
+                listening_marker: Some("...".to_string()),
+                inline_partials: Some(false),
+                partial_interval_ms: Some(750),
+                partial_min_duration_ms: Some(100),
+                leading_silence_ms: Some(400),
+                preroll_ms: Some(1_000),
+            },
+            ..FileConfig::default()
+        };
+
+        let settings = resolve_daemon_settings(&args, &file_config);
+
+        assert_eq!(settings.transcript_dir, Some(PathBuf::from("transcripts")));
+        assert!(settings.stream_response);
+        assert_eq!(settings.listening_marker, Some("...".to_string()));
+        assert!(!settings.inline_partials);
+        assert_eq!(settings.partial_interval_ms, 750);
+        assert_eq!(settings.partial_min_duration_ms, 100);
+        assert_eq!(settings.leading_silence_ms, 400);
+        assert_eq!(settings.preroll_ms, 1_000);
+    }
+
+    #[test]
+    fn daemon_can_disable_stream_response_from_file_config() {
+        let args = parse_daemon_args(["speaches-scribe", "daemon", "--no-stream-response"]);
+        let file_config = FileConfig {
+            dictation: DictationFileConfig {
+                stream_response: Some(true),
+                ..DictationFileConfig::default()
+            },
+            ..FileConfig::default()
+        };
+
+        let settings = resolve_daemon_settings(&args, &file_config);
+
+        assert!(!settings.stream_response);
     }
 
     #[test]
     fn daemon_accepts_custom_listening_marker() {
         let args = parse_daemon_args(["speaches-scribe", "daemon", "--listening-marker", "..."]);
+        let settings = resolve_daemon_settings(&args, &FileConfig::default());
 
-        assert_eq!(resolve_listening_marker(&args), Some("...".to_string()));
-        assert!(resolve_inline_partials(&args));
+        assert_eq!(settings.listening_marker, Some("...".to_string()));
+        assert!(settings.inline_partials);
     }
 
     #[test]
     fn daemon_accepts_custom_preroll() {
         let args = parse_daemon_args(["speaches-scribe", "daemon", "--preroll-ms", "1000"]);
+        let settings = resolve_daemon_settings(&args, &FileConfig::default());
 
-        assert_eq!(args.preroll_ms, 1_000);
+        assert_eq!(args.preroll_ms, Some(1_000));
+        assert_eq!(settings.preroll_ms, 1_000);
     }
 
     #[test]
@@ -617,7 +805,7 @@ mod tests {
                 assert_eq!(args.model.as_deref(), Some("tts-1"));
                 assert_eq!(args.voice.as_deref(), Some("lessac"));
                 assert_eq!(args.response_format.as_deref(), Some("wav"));
-                assert_eq!(args.player, "pw-play");
+                assert_eq!(args.player.as_deref(), Some("pw-play"));
             }
             _ => panic!("expected read-aloud command"),
         }
