@@ -9,6 +9,7 @@ async-trait = "0.1.89"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
+libc = "0.2"
 libxdo = "0.6.0"
 libxdo-sys = "0.11"
 notify-rust = "4.17.0"

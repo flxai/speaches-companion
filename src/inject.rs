@@ -1,3 +1,5 @@
+use std::ffi::CString;
+
 use anyhow::{bail, Context};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,11 +38,23 @@ impl TextInjector for LibXdoTextInjector {
             return Ok(());
         }
 
-        let xdo = libxdo::XDo::new(None)
-            .map_err(|error| anyhow::anyhow!("failed to connect to X11 through libxdo: {error}"))?;
-        xdo.enter_text(text, self.delay_microsecs)
-            .map_err(|error| anyhow::anyhow!("failed to type text through libxdo: {error}"))
-            .context("libxdo text injection failed")
+        let xdo = RawXdo::new()?;
+        xdo.with_cleared_modifiers(|| {
+            let text = CString::new(text).context("text contains an interior NUL byte")?;
+            let code = unsafe {
+                libxdo_sys::xdo_enter_text_window(
+                    xdo.handle,
+                    libxdo_sys::CURRENTWINDOW,
+                    text.as_ptr(),
+                    self.delay_microsecs,
+                )
+            };
+            if code != 0 {
+                bail!("failed to type text through libxdo: error code {code}");
+            }
+            Ok(())
+        })
+        .context("libxdo text injection failed")
     }
 
     fn erase_chars(&self, count: usize) -> anyhow::Result<()> {
@@ -48,16 +62,14 @@ impl TextInjector for LibXdoTextInjector {
             return Ok(());
         }
 
-        let xdo = libxdo::XDo::new(None)
-            .map_err(|error| anyhow::anyhow!("failed to connect to X11 through libxdo: {error}"))?;
-        for _ in 0..count {
-            xdo.send_keysequence("BackSpace", self.delay_microsecs)
-                .map_err(|error| {
-                    anyhow::anyhow!("failed to send BackSpace through libxdo: {error}")
-                })
-                .context("libxdo text erasure failed")?;
-        }
-        Ok(())
+        let xdo = RawXdo::new()?;
+        xdo.with_cleared_modifiers(|| {
+            for _ in 0..count {
+                xdo.send_keysequence("BackSpace", self.delay_microsecs)?;
+            }
+            Ok(())
+        })
+        .context("libxdo text erasure failed")
     }
 
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
@@ -82,6 +94,98 @@ impl RawXdo {
             bail!("failed to connect to X11 through libxdo");
         }
         Ok(Self { handle })
+    }
+
+    fn send_keysequence(&self, keysequence: &str, delay_microsecs: u32) -> anyhow::Result<()> {
+        let keysequence =
+            CString::new(keysequence).context("key sequence contains an interior NUL byte")?;
+        let code = unsafe {
+            libxdo_sys::xdo_send_keysequence_window(
+                self.handle,
+                libxdo_sys::CURRENTWINDOW,
+                keysequence.as_ptr(),
+                delay_microsecs,
+            )
+        };
+        if code != 0 {
+            bail!("failed to send key sequence through libxdo: error code {code}");
+        }
+        Ok(())
+    }
+
+    fn with_cleared_modifiers(
+        &self,
+        operation: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let mut active_mods = std::ptr::null_mut();
+        let mut active_mods_len = 0;
+        let code = unsafe {
+            libxdo_sys::xdo_get_active_modifiers(
+                self.handle,
+                &mut active_mods,
+                &mut active_mods_len,
+            )
+        };
+        if code != 0 {
+            bail!("failed to read active X11 modifiers through libxdo: error code {code}");
+        }
+
+        let clear_result = self.clear_active_modifiers(active_mods, active_mods_len);
+        let operation_result = clear_result.and_then(|()| operation());
+        let restore_result = self.restore_active_modifiers(active_mods, active_mods_len);
+        if !active_mods.is_null() {
+            unsafe { libc::free(active_mods.cast()) };
+        }
+
+        operation_result?;
+        restore_result?;
+        Ok(())
+    }
+
+    fn clear_active_modifiers(
+        &self,
+        active_mods: *mut libxdo_sys::charcodemap_t,
+        active_mods_len: i32,
+    ) -> anyhow::Result<()> {
+        if active_mods_len == 0 || active_mods.is_null() {
+            return Ok(());
+        }
+
+        let code = unsafe {
+            libxdo_sys::xdo_clear_active_modifiers(
+                self.handle,
+                libxdo_sys::CURRENTWINDOW,
+                active_mods,
+                active_mods_len,
+            )
+        };
+        if code != 0 {
+            bail!("failed to clear active X11 modifiers through libxdo: error code {code}");
+        }
+        Ok(())
+    }
+
+    fn restore_active_modifiers(
+        &self,
+        active_mods: *mut libxdo_sys::charcodemap_t,
+        active_mods_len: i32,
+    ) -> anyhow::Result<()> {
+        if active_mods_len == 0 || active_mods.is_null() {
+            return Ok(());
+        }
+
+        let code = unsafe {
+            libxdo_sys::xdo_set_active_modifiers(
+                self.handle,
+                libxdo_sys::CURRENTWINDOW,
+                active_mods,
+                active_mods_len,
+            )
+        };
+        if code != 0 {
+            bail!("failed to restore active X11 modifiers through libxdo: error code {code}");
+        }
+        Ok(())
     }
 }
 

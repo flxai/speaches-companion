@@ -2135,6 +2135,7 @@ dependencies = [
  "clap",
  "futures-util",
  "httpmock",
+ "libc",
  "libxdo",
  "libxdo-sys",
  "notify-rust",
