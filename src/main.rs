@@ -235,20 +235,15 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     if daemon_settings.realtime_partials {
         let transcriber = RealtimeTranscriber::new(config.base_url, config.model, config.language)
             .with_preroll(Duration::from_millis(daemon_settings.preroll_ms));
-        eprintln!("speaches-scribe starting continuous audio capture...");
-        if let Err(error) = transcriber.prepare_capture().await {
-            eprintln!("speaches-scribe failed to start continuous audio capture: {error:#}");
-            return ExitCode::from(1);
-        }
-        eprintln!("speaches-scribe continuous audio capture ready");
-        eprintln!("speaches-scribe warming realtime transcription backend...");
-        match transcriber.warm_up().await {
-            Ok(()) => eprintln!("speaches-scribe realtime transcription backend ready"),
+        match prepare_realtime_daemon_transcriber(transcriber).await {
+            Ok(transcriber) => {
+                run_streaming_daemon(socket_path, daemon_settings, transcriber).await
+            }
             Err(error) => {
-                eprintln!("speaches-scribe realtime transcription warmup failed: {error:#}")
+                eprintln!("speaches-scribe realtime startup failed: {error:#}");
+                ExitCode::from(1)
             }
         }
-        run_streaming_daemon(socket_path, daemon_settings, transcriber).await
     } else {
         let transcriber = RollingHttpTranscriber::new(
             config.base_url,
@@ -282,6 +277,42 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
         }
         run_streaming_daemon(socket_path, daemon_settings, transcriber).await
     }
+}
+
+#[async_trait::async_trait]
+trait RealtimeDaemonStartup: Sized + Sync {
+    async fn prepare_capture(&self) -> anyhow::Result<()>;
+    async fn warm_up(&self) -> anyhow::Result<()>;
+}
+
+#[async_trait::async_trait]
+impl RealtimeDaemonStartup for RealtimeTranscriber {
+    async fn prepare_capture(&self) -> anyhow::Result<()> {
+        RealtimeTranscriber::prepare_capture(self).await
+    }
+
+    async fn warm_up(&self) -> anyhow::Result<()> {
+        RealtimeTranscriber::warm_up(self).await
+    }
+}
+
+async fn prepare_realtime_daemon_transcriber<T>(transcriber: T) -> anyhow::Result<T>
+where
+    T: RealtimeDaemonStartup,
+{
+    eprintln!("speaches-scribe starting continuous audio capture...");
+    transcriber
+        .prepare_capture()
+        .await
+        .context("failed to start continuous audio capture")?;
+    eprintln!("speaches-scribe continuous audio capture ready");
+    eprintln!("speaches-scribe warming realtime transcription backend...");
+    transcriber
+        .warm_up()
+        .await
+        .context("realtime transcription backend is unavailable")?;
+    eprintln!("speaches-scribe realtime transcription backend ready");
+    Ok(transcriber)
 }
 
 async fn run_streaming_daemon<L>(
@@ -835,6 +866,47 @@ mod tests {
     }
 
     #[test]
+    fn daemon_can_disable_realtime_partials_from_file_config() {
+        let args = parse_daemon_args(["speaches-scribe", "daemon", "--no-realtime-partials"]);
+        let file_config = FileConfig {
+            dictation: DictationFileConfig {
+                realtime_partials: Some(true),
+                ..DictationFileConfig::default()
+            },
+            ..FileConfig::default()
+        };
+
+        let settings = resolve_daemon_settings(&args, &file_config);
+
+        assert!(!settings.realtime_partials);
+    }
+
+    #[tokio::test]
+    async fn realtime_daemon_startup_fails_when_warmup_fails() {
+        let startup = FakeRealtimeStartup::new(Ok(()), Err("connection refused"));
+        let events = startup.events.clone();
+
+        let error = prepare_realtime_daemon_transcriber(startup)
+            .await
+            .unwrap_err();
+
+        let error = format!("{error:#}");
+        assert!(error.contains("realtime transcription backend is unavailable"));
+        assert!(error.contains("connection refused"));
+        assert_eq!(*events.lock().unwrap(), vec!["prepare_capture", "warm_up"]);
+    }
+
+    #[tokio::test]
+    async fn realtime_daemon_startup_prepares_before_warmup() {
+        let startup = FakeRealtimeStartup::new(Ok(()), Ok(()));
+        let events = startup.events.clone();
+
+        prepare_realtime_daemon_transcriber(startup).await.unwrap();
+
+        assert_eq!(*events.lock().unwrap(), vec!["prepare_capture", "warm_up"]);
+    }
+
+    #[test]
     fn daemon_accepts_custom_listening_marker() {
         let args = parse_daemon_args(["speaches-scribe", "daemon", "--listening-marker", "..."]);
         let settings = resolve_daemon_settings(&args, &FileConfig::default());
@@ -919,6 +991,39 @@ mod tests {
         match Cli::parse_from(args).command {
             Command::Daemon(args) => args,
             _ => panic!("expected daemon command"),
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeRealtimeStartup {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        prepare_result: Result<(), &'static str>,
+        warm_up_result: Result<(), &'static str>,
+    }
+
+    impl FakeRealtimeStartup {
+        fn new(
+            prepare_result: Result<(), &'static str>,
+            warm_up_result: Result<(), &'static str>,
+        ) -> Self {
+            Self {
+                events: Arc::new(Mutex::new(Vec::new())),
+                prepare_result,
+                warm_up_result,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RealtimeDaemonStartup for FakeRealtimeStartup {
+        async fn prepare_capture(&self) -> anyhow::Result<()> {
+            self.events.lock().unwrap().push("prepare_capture");
+            self.prepare_result.map_err(anyhow::Error::msg)
+        }
+
+        async fn warm_up(&self) -> anyhow::Result<()> {
+            self.events.lock().unwrap().push("warm_up");
+            self.warm_up_result.map_err(anyhow::Error::msg)
         }
     }
 
