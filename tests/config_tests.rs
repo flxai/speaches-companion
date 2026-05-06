@@ -1,10 +1,13 @@
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use speaches_scribe::config::{
-    realtime_ws_url, resolve_config, resolve_tts_config, ConfigInput, TtsConfigInput,
-    DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_TTS_MODEL, DEFAULT_TTS_RESPONSE_FORMAT,
-    DEFAULT_TTS_VOICE,
+    default_config_path_with_env, load_file_config_at, realtime_ws_url, resolve_config,
+    resolve_config_path_with_env, resolve_tts_config, ConfigInput, TtsConfigInput,
+    DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_TTS_MODEL, DEFAULT_TTS_PLAYER,
+    DEFAULT_TTS_RESPONSE_FORMAT, DEFAULT_TTS_VOICE,
 };
+use tempfile::tempdir;
 
 #[test]
 fn defaults_are_derived_from_cfg() {
@@ -30,6 +33,9 @@ fn cli_values_override_environment_values() {
         env_base_url: Some("http://env.example:8000".to_string()),
         env_model: Some("env-model".to_string()),
         env_language: Some("en".to_string()),
+        file_base_url: Some("http://file.example:8000".to_string()),
+        file_model: Some("file-model".to_string()),
+        file_language: Some("fr".to_string()),
     });
 
     assert_eq!(config.base_url, "http://cli.example:9000");
@@ -54,6 +60,20 @@ fn env_values_override_defaults() {
 }
 
 #[test]
+fn file_values_override_defaults() {
+    let config = resolve_config(ConfigInput {
+        file_base_url: Some("http://file.example:8000".to_string()),
+        file_model: Some("file-model".to_string()),
+        file_language: Some("it".to_string()),
+        ..ConfigInput::default()
+    });
+
+    assert_eq!(config.base_url, "http://file.example:8000");
+    assert_eq!(config.model, "file-model");
+    assert_eq!(config.language.as_deref(), Some("it"));
+}
+
+#[test]
 fn tts_defaults_use_speaches_audio_speech_values() {
     let config = resolve_tts_config(TtsConfigInput::default());
 
@@ -61,6 +81,7 @@ fn tts_defaults_use_speaches_audio_speech_values() {
     assert_eq!(config.model, DEFAULT_TTS_MODEL);
     assert_eq!(config.voice, DEFAULT_TTS_VOICE);
     assert_eq!(config.response_format, DEFAULT_TTS_RESPONSE_FORMAT);
+    assert_eq!(config.player, DEFAULT_TTS_PLAYER);
 }
 
 #[test]
@@ -70,16 +91,147 @@ fn tts_cli_values_override_environment_values() {
         cli_model: Some("cli-tts".to_string()),
         cli_voice: Some("cli-voice".to_string()),
         cli_response_format: Some("mp3".to_string()),
+        cli_player: Some("cli-player".to_string()),
         env_base_url: Some("http://env.example:8000".to_string()),
         env_model: Some("env-tts".to_string()),
         env_voice: Some("env-voice".to_string()),
         env_response_format: Some("wav".to_string()),
+        env_player: Some("env-player".to_string()),
+        file_base_url: Some("http://file.example:8000".to_string()),
+        file_model: Some("file-tts".to_string()),
+        file_voice: Some("file-voice".to_string()),
+        file_response_format: Some("opus".to_string()),
+        file_player: Some("file-player".to_string()),
     });
 
     assert_eq!(config.base_url, "http://cli.example:9000");
     assert_eq!(config.model, "cli-tts");
     assert_eq!(config.voice, "cli-voice");
     assert_eq!(config.response_format, "mp3");
+    assert_eq!(config.player, "cli-player");
+}
+
+#[test]
+fn file_tts_values_override_defaults() {
+    let config = resolve_tts_config(TtsConfigInput {
+        file_base_url: Some("http://file.example:8000".to_string()),
+        file_model: Some("file-tts".to_string()),
+        file_voice: Some("file-voice".to_string()),
+        file_response_format: Some("opus".to_string()),
+        file_player: Some("file-player".to_string()),
+        ..TtsConfigInput::default()
+    });
+
+    assert_eq!(config.base_url, "http://file.example:8000");
+    assert_eq!(config.model, "file-tts");
+    assert_eq!(config.voice, "file-voice");
+    assert_eq!(config.response_format, "opus");
+    assert_eq!(config.player, "file-player");
+}
+
+#[test]
+fn loads_toml_file_config() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[speaches]
+base_url = "http://speaches.example:8000"
+
+[stt]
+model = "stt-model"
+language = "de"
+
+[tts]
+model = "tts-model"
+voice = "lessac"
+response_format = "wav"
+player = "pw-play"
+
+[dictation]
+transcript_dir = "transcripts"
+stream_response = true
+listening_marker = "..."
+inline_partials = false
+partial_interval_ms = 750
+partial_min_duration_ms = 100
+leading_silence_ms = 400
+preroll_ms = 1000
+"#,
+    )
+    .unwrap();
+
+    let config = load_file_config_at(&config_path).unwrap();
+
+    assert_eq!(
+        config.speaches.base_url.as_deref(),
+        Some("http://speaches.example:8000")
+    );
+    assert_eq!(config.stt.model.as_deref(), Some("stt-model"));
+    assert_eq!(config.stt.language.as_deref(), Some("de"));
+    assert_eq!(config.tts.model.as_deref(), Some("tts-model"));
+    assert_eq!(config.tts.voice.as_deref(), Some("lessac"));
+    assert_eq!(config.tts.response_format.as_deref(), Some("wav"));
+    assert_eq!(config.tts.player.as_deref(), Some("pw-play"));
+    assert_eq!(
+        config.dictation.transcript_dir.as_deref(),
+        Some(Path::new("transcripts"))
+    );
+    assert_eq!(config.dictation.stream_response, Some(true));
+    assert_eq!(config.dictation.listening_marker.as_deref(), Some("..."));
+    assert_eq!(config.dictation.inline_partials, Some(false));
+    assert_eq!(config.dictation.partial_interval_ms, Some(750));
+    assert_eq!(config.dictation.partial_min_duration_ms, Some(100));
+    assert_eq!(config.dictation.leading_silence_ms, Some(400));
+    assert_eq!(config.dictation.preroll_ms, Some(1000));
+}
+
+#[test]
+fn missing_toml_config_uses_defaults() {
+    let dir = tempdir().unwrap();
+    let config = load_file_config_at(&dir.path().join("missing.toml")).unwrap();
+
+    assert_eq!(config.speaches.base_url, None);
+    assert_eq!(config.stt.model, None);
+    assert_eq!(config.tts.voice, None);
+}
+
+#[test]
+fn default_config_path_uses_xdg_then_home() {
+    let mut env = BTreeMap::new();
+    env.insert("XDG_CONFIG_HOME".to_string(), "/tmp/xdg".to_string());
+    env.insert("HOME".to_string(), "/home/example".to_string());
+
+    assert_eq!(
+        default_config_path_with_env(&env).unwrap(),
+        PathBuf::from("/tmp/xdg/speaches-scribe/config.toml")
+    );
+
+    env.remove("XDG_CONFIG_HOME");
+    assert_eq!(
+        default_config_path_with_env(&env).unwrap(),
+        PathBuf::from("/home/example/.config/speaches-scribe/config.toml")
+    );
+}
+
+#[test]
+fn config_path_prefers_cli_then_environment() {
+    let mut env = BTreeMap::new();
+    env.insert(
+        "SPEACHES_SCRIBE_CONFIG".to_string(),
+        "/tmp/env-config.toml".to_string(),
+    );
+    env.insert("HOME".to_string(), "/home/example".to_string());
+
+    assert_eq!(
+        resolve_config_path_with_env(Some(PathBuf::from("/tmp/cli-config.toml")), &env).unwrap(),
+        PathBuf::from("/tmp/cli-config.toml")
+    );
+    assert_eq!(
+        resolve_config_path_with_env(None, &env).unwrap(),
+        PathBuf::from("/tmp/env-config.toml")
+    );
 }
 
 #[test]

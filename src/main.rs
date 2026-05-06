@@ -336,6 +336,7 @@ where
         cli_model: args.model,
         cli_voice: args.voice,
         cli_response_format: args.response_format,
+        cli_player: None,
         env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
         env_model: env_or("SPEACHES_SCRIBE_TTS_MODEL", "SPEACHES_TTS_MODEL"),
         env_voice: env_or("SPEACHES_SCRIBE_TTS_VOICE", "SPEACHES_TTS_VOICE"),
@@ -343,6 +344,8 @@ where
             "SPEACHES_SCRIBE_TTS_RESPONSE_FORMAT",
             "SPEACHES_TTS_RESPONSE_FORMAT",
         ),
+        env_player: env_or("SPEACHES_SCRIBE_TTS_PLAYER", "SPEACHES_TTS_PLAYER"),
+        ..TtsConfigInput::default()
     });
     let result = read_aloud(args.text, &args.player, config).await;
     match result {
@@ -467,6 +470,7 @@ async fn run_dictate_live_command(args: DictateLiveArgs) -> ExitCode {
         env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
         env_model: std::env::var("SPEACHES_SCRIBE_MODEL").ok(),
         env_language: std::env::var("SPEACHES_SCRIBE_LANGUAGE").ok(),
+        ..ConfigInput::default()
     });
 
     match run_dictate_live(config).await {

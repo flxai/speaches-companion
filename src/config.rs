@@ -1,14 +1,68 @@
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
+use serde::Deserialize;
 use url::Url;
 
 pub const DEFAULT_BASE_URL: &str = "http://ono.tail:8000";
 pub const DEFAULT_MODEL: &str = "Systran/faster-whisper-large-v3";
 pub const DEFAULT_TTS_MODEL: &str = "tts-1";
+pub const DEFAULT_TTS_PLAYER: &str = "pw-play";
 pub const DEFAULT_TTS_RESPONSE_FORMAT: &str = "wav";
 pub const DEFAULT_TTS_VOICE: &str = "en_US-lessac-medium";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct FileConfig {
+    #[serde(default)]
+    pub speaches: SpeachesFileConfig,
+    #[serde(default)]
+    pub stt: SttFileConfig,
+    #[serde(default)]
+    pub tts: TtsFileConfig,
+    #[serde(default)]
+    pub dictation: DictationFileConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct SpeachesFileConfig {
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct SttFileConfig {
+    pub model: Option<String>,
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct TtsFileConfig {
+    pub model: Option<String>,
+    pub voice: Option<String>,
+    pub response_format: Option<String>,
+    pub player: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct DictationFileConfig {
+    pub transcript_dir: Option<PathBuf>,
+    pub stream_response: Option<bool>,
+    pub listening_marker: Option<String>,
+    pub inline_partials: Option<bool>,
+    pub partial_interval_ms: Option<u64>,
+    pub partial_min_duration_ms: Option<u64>,
+    pub leading_silence_ms: Option<u64>,
+    pub preroll_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedFileConfig {
+    pub path: PathBuf,
+    pub config: FileConfig,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DictateLiveConfig {
@@ -25,6 +79,7 @@ pub struct TtsConfig {
     pub model: String,
     pub voice: String,
     pub response_format: String,
+    pub player: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,6 +92,9 @@ pub struct ConfigInput {
     pub env_base_url: Option<String>,
     pub env_model: Option<String>,
     pub env_language: Option<String>,
+    pub file_base_url: Option<String>,
+    pub file_model: Option<String>,
+    pub file_language: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -45,18 +103,36 @@ pub struct TtsConfigInput {
     pub cli_model: Option<String>,
     pub cli_voice: Option<String>,
     pub cli_response_format: Option<String>,
+    pub cli_player: Option<String>,
     pub env_base_url: Option<String>,
     pub env_model: Option<String>,
     pub env_voice: Option<String>,
     pub env_response_format: Option<String>,
+    pub env_player: Option<String>,
+    pub file_base_url: Option<String>,
+    pub file_model: Option<String>,
+    pub file_voice: Option<String>,
+    pub file_response_format: Option<String>,
+    pub file_player: Option<String>,
 }
 
 pub fn resolve_config(input: ConfigInput) -> DictateLiveConfig {
-    let base_url = choose(input.cli_base_url, input.env_base_url, DEFAULT_BASE_URL);
-    let model = choose(input.cli_model, input.env_model, DEFAULT_MODEL);
+    let base_url = choose(
+        input.cli_base_url,
+        input.env_base_url,
+        input.file_base_url,
+        DEFAULT_BASE_URL,
+    );
+    let model = choose(
+        input.cli_model,
+        input.env_model,
+        input.file_model,
+        DEFAULT_MODEL,
+    );
     let language = input
         .cli_language
         .or(input.env_language)
+        .or(input.file_language)
         .and_then(non_empty_string);
     let duration_seconds = input.cli_duration_seconds.unwrap_or(10);
     let trace_path = input.cli_trace_path.unwrap_or_else(default_trace_path);
@@ -72,15 +148,90 @@ pub fn resolve_config(input: ConfigInput) -> DictateLiveConfig {
 
 pub fn resolve_tts_config(input: TtsConfigInput) -> TtsConfig {
     TtsConfig {
-        base_url: choose(input.cli_base_url, input.env_base_url, DEFAULT_BASE_URL),
-        model: choose(input.cli_model, input.env_model, DEFAULT_TTS_MODEL),
-        voice: choose(input.cli_voice, input.env_voice, DEFAULT_TTS_VOICE),
+        base_url: choose(
+            input.cli_base_url,
+            input.env_base_url,
+            input.file_base_url,
+            DEFAULT_BASE_URL,
+        ),
+        model: choose(
+            input.cli_model,
+            input.env_model,
+            input.file_model,
+            DEFAULT_TTS_MODEL,
+        ),
+        voice: choose(
+            input.cli_voice,
+            input.env_voice,
+            input.file_voice,
+            DEFAULT_TTS_VOICE,
+        ),
         response_format: choose(
             input.cli_response_format,
             input.env_response_format,
+            input.file_response_format,
             DEFAULT_TTS_RESPONSE_FORMAT,
         ),
+        player: choose(
+            input.cli_player,
+            input.env_player,
+            input.file_player,
+            DEFAULT_TTS_PLAYER,
+        ),
     }
+}
+
+pub fn load_file_config(config_path: Option<PathBuf>) -> anyhow::Result<LoadedFileConfig> {
+    let env = std::env::vars().collect::<BTreeMap<_, _>>();
+    let path = resolve_config_path_with_env(config_path, &env)?;
+    let config = load_file_config_at(&path)?;
+    Ok(LoadedFileConfig { path, config })
+}
+
+pub fn load_file_config_at(path: &Path) -> anyhow::Result<FileConfig> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(FileConfig::default()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read config {}", path.display()))
+        }
+    };
+
+    toml::from_str(&contents).with_context(|| format!("failed to parse config {}", path.display()))
+}
+
+pub fn resolve_config_path_with_env(
+    cli_config_path: Option<PathBuf>,
+    env: &BTreeMap<String, String>,
+) -> anyhow::Result<PathBuf> {
+    if let Some(path) = cli_config_path {
+        return Ok(path);
+    }
+    if let Some(path) = env
+        .get("SPEACHES_SCRIBE_CONFIG")
+        .and_then(|value| non_empty_str(value))
+    {
+        return Ok(PathBuf::from(path));
+    }
+    default_config_path_with_env(env)
+}
+
+pub fn default_config_path_with_env(env: &BTreeMap<String, String>) -> anyhow::Result<PathBuf> {
+    if let Some(path) = env
+        .get("XDG_CONFIG_HOME")
+        .and_then(|value| non_empty_str(value))
+    {
+        return Ok(PathBuf::from(path)
+            .join("speaches-scribe")
+            .join("config.toml"));
+    }
+    if let Some(home) = env.get("HOME").and_then(|value| non_empty_str(value)) {
+        return Ok(PathBuf::from(home)
+            .join(".config")
+            .join("speaches-scribe")
+            .join("config.toml"));
+    }
+    bail!("failed to resolve speaches-scribe config path: XDG_CONFIG_HOME and HOME are unset")
 }
 
 pub fn realtime_ws_url(
@@ -118,9 +269,10 @@ pub fn health_url(base_url: &str) -> anyhow::Result<String> {
     Ok(url.to_string())
 }
 
-fn choose(cli: Option<String>, env: Option<String>, default: &str) -> String {
+fn choose(cli: Option<String>, env: Option<String>, file: Option<String>, default: &str) -> String {
     cli.and_then(non_empty_string)
         .or_else(|| env.and_then(non_empty_string))
+        .or_else(|| file.and_then(non_empty_string))
         .unwrap_or_else(|| default.to_string())
 }
 
