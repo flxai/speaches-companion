@@ -10,7 +10,7 @@ use trec::streaming::{
 };
 
 #[tokio::test]
-async fn streaming_hotkey_injects_final_text_and_reports_partials() {
+async fn streaming_hotkey_replaces_partial_text_with_final_text() {
     let transcriber =
         FakeLiveTranscriber::new(["hel", "hello win"], Ok("  hello window\n".to_string()));
     let starts = transcriber.starts.clone();
@@ -59,8 +59,6 @@ async fn streaming_hotkey_injects_final_text_and_reports_partials() {
         *transcript_events.lock().unwrap(),
         vec![
             TranscriptNotice::Listening,
-            TranscriptNotice::Partial("hel".to_string()),
-            TranscriptNotice::Partial("hello win".to_string()),
             TranscriptNotice::Final("hello window".to_string()),
         ]
     );
@@ -200,7 +198,6 @@ async fn duplicate_streaming_partials_are_ignored() {
         *transcript_events.lock().unwrap(),
         vec![
             TranscriptNotice::Listening,
-            TranscriptNotice::Partial("hello".to_string()),
             TranscriptNotice::Final("hello".to_string()),
         ]
     );

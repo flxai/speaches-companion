@@ -151,7 +151,6 @@ where
 
         let partial_task = tokio::spawn(consume_live_updates(
             live_session.updates,
-            self.transcript_notifier.clone(),
             self.error_notifier.clone(),
             text_session,
         ));
@@ -207,15 +206,13 @@ where
     }
 }
 
-async fn consume_live_updates<I, V, N>(
+async fn consume_live_updates<I, N>(
     mut updates: mpsc::Receiver<LiveTranscriptUpdate>,
-    notifier: V,
     error_notifier: N,
     mut text_session: SpeculativeTextSession<I>,
 ) -> SpeculativeTextSession<I>
 where
     I: TextInjector,
-    V: TranscriptNotifier,
     N: ErrorNotifier,
 {
     while let Some(update) = updates.recv().await {
@@ -223,12 +220,7 @@ where
             continue;
         };
         match text_session.replace_text(&transcript) {
-            Ok(true) => {
-                if let Err(error) = notifier.notify_partial(&transcript) {
-                    eprintln!("trec partial transcript notification failed: {error:#}");
-                }
-            }
-            Ok(false) => {}
+            Ok(_) => {}
             Err(error) => {
                 notify_failure(&error_notifier, "Partial text replacement failed", &error);
                 break;
