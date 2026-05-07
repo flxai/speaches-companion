@@ -85,6 +85,10 @@ struct DaemonArgs {
     inline_partials: bool,
     #[arg(long)]
     no_inline_partials: bool,
+    #[arg(long, conflicts_with = "no_append_space")]
+    append_space: bool,
+    #[arg(long)]
+    no_append_space: bool,
     #[arg(long)]
     partial_interval_ms: Option<u64>,
     #[arg(long)]
@@ -345,7 +349,8 @@ where
         NoopErrorNotifier,
     )
     .with_listening_marker(daemon_settings.listening_marker)
-    .with_inline_partials(daemon_settings.inline_partials);
+    .with_inline_partials(daemon_settings.inline_partials)
+    .with_append_space(daemon_settings.append_space);
 
     eprintln!(
         "speaches-scribe daemon listening on {}",
@@ -367,6 +372,7 @@ struct DaemonSettings {
     realtime_partials: bool,
     listening_marker: Option<String>,
     inline_partials: bool,
+    append_space: bool,
     partial_interval_ms: u64,
     partial_min_duration_ms: u64,
     leading_silence_ms: u64,
@@ -383,6 +389,7 @@ fn resolve_daemon_settings(args: &DaemonArgs, file_config: &FileConfig) -> Daemo
         realtime_partials: resolve_realtime_partials(args, file_config),
         listening_marker: resolve_listening_marker(args, file_config),
         inline_partials: resolve_inline_partials(args, file_config),
+        append_space: resolve_append_space(args, file_config),
         partial_interval_ms: args
             .partial_interval_ms
             .or(file_config.dictation.partial_interval_ms)
@@ -441,6 +448,16 @@ fn resolve_inline_partials(args: &DaemonArgs, file_config: &FileConfig) -> bool 
         false
     } else {
         file_config.dictation.inline_partials.unwrap_or(true)
+    }
+}
+
+fn resolve_append_space(args: &DaemonArgs, file_config: &FileConfig) -> bool {
+    if args.append_space {
+        true
+    } else if args.no_append_space {
+        false
+    } else {
+        file_config.dictation.append_space.unwrap_or(true)
     }
 }
 
@@ -846,6 +863,7 @@ mod tests {
             Some(DEFAULT_LISTENING_MARKER.to_string())
         );
         assert!(settings.inline_partials);
+        assert!(settings.append_space);
         assert_eq!(settings.preroll_ms, DEFAULT_PREROLL_MS);
     }
 
@@ -858,6 +876,10 @@ mod tests {
         let args = parse_daemon_args(["speaches-scribe", "daemon", "--no-inline-partials"]);
         let settings = resolve_daemon_settings(&args, &FileConfig::default());
         assert!(!settings.inline_partials);
+
+        let args = parse_daemon_args(["speaches-scribe", "daemon", "--no-append-space"]);
+        let settings = resolve_daemon_settings(&args, &FileConfig::default());
+        assert!(!settings.append_space);
     }
 
     #[test]
@@ -870,6 +892,7 @@ mod tests {
                 realtime_partials: Some(true),
                 listening_marker: Some("...".to_string()),
                 inline_partials: Some(false),
+                append_space: Some(false),
                 partial_interval_ms: Some(750),
                 partial_min_duration_ms: Some(100),
                 leading_silence_ms: Some(400),
@@ -885,6 +908,7 @@ mod tests {
         assert!(settings.realtime_partials);
         assert_eq!(settings.listening_marker, Some("...".to_string()));
         assert!(!settings.inline_partials);
+        assert!(!settings.append_space);
         assert_eq!(settings.partial_interval_ms, 750);
         assert_eq!(settings.partial_min_duration_ms, 100);
         assert_eq!(settings.leading_silence_ms, 400);

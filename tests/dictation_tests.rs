@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use speaches_scribe::daemon::{DaemonResponse, HotkeyHandler};
 use speaches_scribe::dictation::{DictationController, Recorder, Transcriber};
-use speaches_scribe::inject::{normalize_transcript_for_injection, TextInjector};
+use speaches_scribe::inject::{
+    format_transcript_for_injection, normalize_transcript_for_injection, TextInjector,
+};
 use speaches_scribe::ipc::IpcCommand;
 use speaches_scribe::notification::{ErrorNotifier, DICTATION_ERROR_SUMMARY};
 
@@ -42,6 +44,27 @@ async fn hotkey_up_records_transcribes_and_injects_text() {
         *transcribed_paths.lock().unwrap(),
         vec![PathBuf::from("/tmp/speaches-scribe-test.wav")]
     );
+    assert_eq!(*injected.lock().unwrap(), vec!["hello window ".to_string()]);
+}
+
+#[tokio::test]
+async fn trailing_space_can_be_disabled() {
+    let recorder = FakeRecorder::new(PathBuf::from("/tmp/speaches-scribe-test.wav"));
+    let injector = FakeInjector::default();
+    let injected = injector.injected.clone();
+    let mut controller =
+        DictationController::new(recorder, FakeTranscriber::new("  hello window\n"), injector)
+            .with_append_space(false);
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    controller
+        .handle_hotkey(IpcCommand::HotkeyUp)
+        .await
+        .unwrap();
+
     assert_eq!(*injected.lock().unwrap(), vec!["hello window".to_string()]);
 }
 
@@ -162,6 +185,19 @@ fn transcript_normalization_trims_outer_whitespace_only() {
         Some("hello world".to_string())
     );
     assert_eq!(normalize_transcript_for_injection("\n\t"), None);
+}
+
+#[test]
+fn transcript_formatting_appends_optional_space_after_normalized_text() {
+    assert_eq!(
+        format_transcript_for_injection("  hello world\n", true),
+        Some("hello world ".to_string())
+    );
+    assert_eq!(
+        format_transcript_for_injection("  hello world\n", false),
+        Some("hello world".to_string())
+    );
+    assert_eq!(format_transcript_for_injection("\n\t", true), None);
 }
 
 #[derive(Clone)]

@@ -605,6 +605,14 @@ pub fn normalize_transcript_for_injection(transcript: &str) -> Option<String> {
     }
 }
 
+pub fn format_transcript_for_injection(transcript: &str, append_space: bool) -> Option<String> {
+    let mut text = normalize_transcript_for_injection(transcript)?;
+    if append_space {
+        text.push(' ');
+    }
+    Some(text)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};

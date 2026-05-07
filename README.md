@@ -67,6 +67,7 @@ stream_response = false
 realtime_partials = false
 listening_marker = "💬"
 inline_partials = true
+append_space = true
 partial_interval_ms = 1250
 partial_min_duration_ms = 0
 leading_silence_ms = 250
@@ -116,6 +117,10 @@ for those bindings:
 ```sh
 nix run . -- daemon --no-inline-partials
 ```
+
+Final dictation text gets one trailing space by default, so the next typed word
+starts naturally after the injected transcript. Use `append_space = false` or
+`--no-append-space` to keep the transcript exact after trimming.
 
 The daemon inserts `💬` after audio capture starts, then replaces it with the
 first partial or final text. Override or disable it with:

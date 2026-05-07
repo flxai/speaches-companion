@@ -7,7 +7,7 @@ use crate::audio::{
     start_raw_pcm_recording, stop_raw_pcm_recording, RawPcmRecording, STT_SAMPLE_RATE,
 };
 use crate::daemon::{DaemonResponse, HotkeyHandler};
-use crate::inject::{normalize_transcript_for_injection, TextInjector};
+use crate::inject::{format_transcript_for_injection, TextInjector};
 use crate::ipc::IpcCommand;
 use crate::notification::{
     dictation_error_body, ErrorNotifier, NoopErrorNotifier, DICTATION_ERROR_SUMMARY,
@@ -39,6 +39,7 @@ where
     injector: I,
     notifier: N,
     recording: Option<R::Recording>,
+    append_space: bool,
 }
 
 impl<R, T, I> DictationController<R, T, I>
@@ -54,6 +55,7 @@ where
             injector,
             notifier: NoopErrorNotifier,
             recording: None,
+            append_space: true,
         }
     }
 }
@@ -72,7 +74,13 @@ where
             injector,
             notifier,
             recording: None,
+            append_space: true,
         }
+    }
+
+    pub fn with_append_space(mut self, append_space: bool) -> Self {
+        self.append_space = append_space;
+        self
     }
 
     pub fn is_recording(&self) -> bool {
@@ -137,7 +145,7 @@ where
                 return Err(error);
             }
         };
-        if let Some(text) = normalize_transcript_for_injection(&transcript) {
+        if let Some(text) = format_transcript_for_injection(&transcript, self.append_space) {
             if let Err(error) = self.injector.inject_text(&text) {
                 self.notify_failure("Text injection failed", &error);
                 return Err(error);

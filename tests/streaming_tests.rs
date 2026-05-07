@@ -52,7 +52,7 @@ async fn streaming_hotkey_replaces_partial_text_with_final_text() {
         vec![
             InjectOperation::Type("hel".to_string()),
             InjectOperation::Type("lo win".to_string()),
-            InjectOperation::Type("dow".to_string()),
+            InjectOperation::Type("dow ".to_string()),
         ]
     );
     assert_eq!(
@@ -156,7 +156,7 @@ async fn streaming_marker_is_replaced_by_partial_and_final_text() {
             InjectOperation::Type("💬".to_string()),
             InjectOperation::Backspace(1),
             InjectOperation::Type("hello".to_string()),
-            InjectOperation::Type(" window".to_string()),
+            InjectOperation::Type(" window ".to_string()),
         ]
     );
 }
@@ -215,7 +215,10 @@ async fn streaming_uses_last_partial_when_final_is_empty() {
 
     assert_eq!(
         *operations.lock().unwrap(),
-        vec![InjectOperation::Type("fallback text".to_string())]
+        vec![
+            InjectOperation::Type("fallback text".to_string()),
+            InjectOperation::Type(" ".to_string()),
+        ]
     );
 }
 
@@ -247,7 +250,7 @@ async fn streaming_can_defer_partial_injection_until_stop() {
 
     assert_eq!(
         *operations.lock().unwrap(),
-        vec![InjectOperation::Type("fallback text".to_string())]
+        vec![InjectOperation::Type("fallback text ".to_string())]
     );
 }
 
@@ -281,7 +284,10 @@ async fn streaming_stop_error_keeps_speculative_partial_and_notifies() {
     assert!(error.to_string().contains("connection refused"));
     assert_eq!(
         *operations.lock().unwrap(),
-        vec![InjectOperation::Type("partial".to_string())]
+        vec![
+            InjectOperation::Type("partial".to_string()),
+            InjectOperation::Type(" ".to_string()),
+        ]
     );
     assert_eq!(
         *errors.lock().unwrap(),
@@ -388,7 +394,10 @@ async fn duplicate_streaming_partials_are_ignored() {
 
     assert_eq!(
         *operations.lock().unwrap(),
-        vec![InjectOperation::Type("hello".to_string())]
+        vec![
+            InjectOperation::Type("hello".to_string()),
+            InjectOperation::Type(" ".to_string()),
+        ]
     );
     assert_eq!(
         *transcript_events.lock().unwrap(),
@@ -396,6 +405,39 @@ async fn duplicate_streaming_partials_are_ignored() {
             TranscriptNotice::Listening,
             TranscriptNotice::Partial("hello".to_string()),
             TranscriptNotice::Final("hello".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn streaming_trailing_space_can_be_disabled() {
+    let transcriber =
+        FakeLiveTranscriber::new(["hel", "hello win"], Ok("hello window".to_string()));
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        FakeErrorNotifier::default(),
+    )
+    .with_append_space(false);
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    controller
+        .handle_hotkey(IpcCommand::HotkeyUp)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            InjectOperation::Type("hel".to_string()),
+            InjectOperation::Type("lo win".to_string()),
+            InjectOperation::Type("dow".to_string()),
         ]
     );
 }

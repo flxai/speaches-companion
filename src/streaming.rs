@@ -13,7 +13,10 @@ use crate::audio::{
     StreamingPcmSession, STT_SAMPLE_RATE,
 };
 use crate::daemon::{DaemonResponse, HotkeyHandler};
-use crate::inject::{normalize_transcript_for_injection, SpeculativeTextSession, TextInjector};
+use crate::inject::{
+    format_transcript_for_injection, normalize_transcript_for_injection, SpeculativeTextSession,
+    TextInjector,
+};
 use crate::ipc::IpcCommand;
 use crate::notification::{
     dictation_error_body, ErrorNotifier, NoopErrorNotifier, NoopTranscriptNotifier,
@@ -63,6 +66,7 @@ where
     error_notifier: N,
     listening_marker: Option<String>,
     inline_partials: bool,
+    append_space: bool,
     active: Option<ActiveStreamingSession<L::Session, I>>,
 }
 
@@ -95,6 +99,7 @@ where
             error_notifier: NoopErrorNotifier,
             listening_marker: None,
             inline_partials: true,
+            append_space: true,
             active: None,
         }
     }
@@ -120,6 +125,7 @@ where
             error_notifier,
             listening_marker: None,
             inline_partials: true,
+            append_space: true,
             active: None,
         }
     }
@@ -132,6 +138,11 @@ where
 
     pub fn with_inline_partials(mut self, inline_partials: bool) -> Self {
         self.inline_partials = inline_partials;
+        self
+    }
+
+    pub fn with_append_space(mut self, append_space: bool) -> Self {
+        self.append_space = append_space;
         self
     }
 
@@ -223,8 +234,14 @@ where
                     }
                 };
                 if let Some(partial) = partial_state.latest_partial.as_deref() {
-                    if let Err(replace_error) = partial_state.text_session.replace_text(partial) {
-                        self.notify_failure("Partial fallback replacement failed", &replace_error);
+                    if let Some(text) = format_transcript_for_injection(partial, self.append_space)
+                    {
+                        if let Err(replace_error) = partial_state.text_session.replace_text(&text) {
+                            self.notify_failure(
+                                "Partial fallback replacement failed",
+                                &replace_error,
+                            );
+                        }
                     }
                 } else if !partial_state.text_session.inserted_text().is_empty() {
                     if let Err(cleanup_error) = partial_state.text_session.replace_text("") {
@@ -244,18 +261,23 @@ where
         };
 
         match normalize_transcript_for_injection(&final_transcript) {
-            Some(text) => {
+            Some(transcript) => {
+                let text = format_transcript_for_injection(&transcript, self.append_space)
+                    .expect("normalized transcript should format for injection");
                 if let Err(error) = partial_state.text_session.replace_text(&text) {
                     self.notify_failure("Final text replacement failed", &error);
                     return Err(error);
                 }
-                self.notify_transcript(|notifier| notifier.notify_final(&text));
+                self.notify_transcript(|notifier| notifier.notify_final(&transcript));
             }
             None => {
                 if let Some(partial) = partial_state.latest_partial.as_deref() {
-                    if let Err(error) = partial_state.text_session.replace_text(partial) {
-                        self.notify_failure("Partial fallback replacement failed", &error);
-                        return Err(error);
+                    if let Some(text) = format_transcript_for_injection(partial, self.append_space)
+                    {
+                        if let Err(error) = partial_state.text_session.replace_text(&text) {
+                            self.notify_failure("Partial fallback replacement failed", &error);
+                            return Err(error);
+                        }
                     }
                 } else if !partial_state.text_session.inserted_text().is_empty() {
                     if let Err(error) = partial_state.text_session.replace_text("") {
