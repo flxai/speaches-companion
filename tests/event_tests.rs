@@ -29,6 +29,21 @@ fn classifies_completed_transcription() {
 }
 
 #[test]
+fn classifies_input_transcription_hypothesis() {
+    let event = json!({
+        "type": "conversation.item.input_audio_transcription.hypothesis",
+        "transcript": "the front fell",
+        "confirmed_prefix": "the front",
+        "provisional": "fell"
+    });
+
+    assert_eq!(
+        classify_event(&event),
+        RealtimeEvent::LiveHypothesis("the front fell".to_string())
+    );
+}
+
+#[test]
 fn classifies_failed_transcription() {
     let event = json!({
         "type": "conversation.item.input_audio_transcription.failed",
@@ -46,6 +61,16 @@ fn phase_passes_only_when_delta_precedes_completion() {
     let mut gate = PhaseGate::default();
 
     gate.observe(&RealtimeEvent::LiveDelta("hello".to_string()));
+    gate.observe(&RealtimeEvent::Completed("hello world".to_string()));
+
+    assert_eq!(gate.result(), PhaseResult::Passed);
+}
+
+#[test]
+fn phase_passes_when_hypothesis_precedes_completion() {
+    let mut gate = PhaseGate::default();
+
+    gate.observe(&RealtimeEvent::LiveHypothesis("hello".to_string()));
     gate.observe(&RealtimeEvent::Completed("hello world".to_string()));
 
     assert_eq!(gate.result(), PhaseResult::Passed);

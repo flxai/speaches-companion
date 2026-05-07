@@ -313,7 +313,15 @@ where
 {
     let mut latest_partial = None;
     while let Some(update) = updates.recv().await {
-        let Some(transcript) = normalize_transcript_for_injection(&update.transcript) else {
+        let transcript = normalize_transcript_for_injection(&update.transcript);
+        let Some(transcript) = transcript else {
+            if latest_partial.is_some() || !text_session.inserted_text().is_empty() {
+                latest_partial = None;
+                if let Err(error) = text_session.replace_text("") {
+                    notify_failure(&error_notifier, "Partial text cleanup failed", &error);
+                    break;
+                }
+            }
             continue;
         };
         if latest_partial.as_deref() == Some(transcript.as_str()) {

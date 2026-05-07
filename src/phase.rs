@@ -18,7 +18,9 @@ pub struct PhaseGate {
 impl PhaseGate {
     pub fn observe(&mut self, event: &RealtimeEvent) {
         match event {
-            RealtimeEvent::LiveDelta(delta) if !delta.trim().is_empty() && !self.saw_completion => {
+            RealtimeEvent::LiveDelta(delta) | RealtimeEvent::LiveHypothesis(delta)
+                if !delta.trim().is_empty() && !self.saw_completion =>
+            {
                 self.saw_live_delta = true;
             }
             RealtimeEvent::Completed(_) => {

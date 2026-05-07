@@ -93,6 +93,37 @@ async fn streaming_injects_live_partial_before_hotkey_up() {
 }
 
 #[tokio::test]
+async fn streaming_empty_live_update_erases_provisional_text() {
+    let transcriber = ManualLiveTranscriber::new("");
+    let updates = transcriber.updates.clone();
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        FakeErrorNotifier::default(),
+    );
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    updates.send("hello").await;
+    wait_for_operations_len(&operations, 1).await;
+    updates.send("").await;
+    wait_for_operations_len(&operations, 2).await;
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            InjectOperation::Type("hello".to_string()),
+            InjectOperation::Backspace(5),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn streaming_marker_is_replaced_by_live_partial_before_hotkey_up() {
     let transcriber = ManualLiveTranscriber::new("hello window");
     let updates = transcriber.updates.clone();

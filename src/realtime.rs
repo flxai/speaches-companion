@@ -51,7 +51,8 @@ pub struct RealtimeSession {
 #[derive(Debug, Default)]
 struct RealtimeTranscriptAccumulator {
     completed_segments: Vec<String>,
-    live_text: String,
+    current_confirmed: String,
+    current_text: String,
 }
 
 impl RealtimeTranscriptAccumulator {
@@ -59,15 +60,26 @@ impl RealtimeTranscriptAccumulator {
         if delta.trim().is_empty() {
             return None;
         }
-        self.live_text.push_str(delta);
+        self.current_confirmed = append_transcript_text(&self.current_confirmed, delta);
+        self.current_text = self.current_confirmed.clone();
         self.current()
+    }
+
+    fn observe_hypothesis(&mut self, transcript: &str) -> String {
+        self.current_text = transcript.trim().to_string();
+        self.current()
+            .or_else(|| {
+                combine_transcript_segments(self.completed_segments.iter().map(String::as_str))
+            })
+            .unwrap_or_default()
     }
 
     fn observe_completion(&mut self, final_transcript: &str) -> Option<String> {
         if let Some(segment) = normalized_transcript_segment(final_transcript) {
             self.completed_segments.push(segment);
         }
-        self.live_text.clear();
+        self.current_confirmed.clear();
+        self.current_text.clear();
         self.current()
     }
 
@@ -76,7 +88,7 @@ impl RealtimeTranscriptAccumulator {
             self.completed_segments
                 .iter()
                 .map(String::as_str)
-                .chain(std::iter::once(self.live_text.as_str())),
+                .chain(std::iter::once(self.current_text.as_str())),
         )
     }
 }
@@ -115,6 +127,15 @@ fn push_transcript_segment(combined: &mut String, segment: &str) {
         combined.push(' ');
         combined.push_str(segment);
     }
+}
+
+fn append_transcript_text(prefix: &str, suffix: &str) -> String {
+    let Some(suffix) = normalized_transcript_segment(suffix) else {
+        return prefix.to_string();
+    };
+    let mut combined = prefix.to_string();
+    push_transcript_segment(&mut combined, &suffix);
+    combined
 }
 
 fn is_leading_punctuation(character: char) -> bool {
@@ -268,6 +289,16 @@ impl LiveTranscriber for RealtimeTranscriber {
                             if !send_live_update(&updates_tx, transcript).await {
                                 break;
                             }
+                        }
+                    }
+                    RealtimeEvent::LiveHypothesis(hypothesis) => {
+                        if !send_live_update(
+                            &updates_tx,
+                            transcript.observe_hypothesis(&hypothesis),
+                        )
+                        .await
+                        {
+                            break;
                         }
                     }
                     RealtimeEvent::Completed(final_transcript) => {
@@ -581,6 +612,33 @@ mod tests {
 
         assert_eq!(transcript.observe_delta("   "), None);
         assert_eq!(transcript.current(), None);
+    }
+
+    #[test]
+    fn realtime_transcript_accumulator_replaces_live_hypothesis() {
+        let mut transcript = RealtimeTranscriptAccumulator::default();
+
+        assert_eq!(transcript.observe_hypothesis("hello"), "hello");
+        assert_eq!(transcript.observe_hypothesis("the front"), "the front");
+        assert_eq!(transcript.observe_hypothesis(""), "");
+    }
+
+    #[test]
+    fn realtime_transcript_accumulator_combines_confirmed_and_hypothesis_text() {
+        let mut transcript = RealtimeTranscriptAccumulator::default();
+
+        assert_eq!(
+            transcript.observe_hypothesis("the front fell"),
+            "the front fell"
+        );
+        assert_eq!(
+            transcript.observe_delta("the front"),
+            Some("the front".to_string())
+        );
+        assert_eq!(
+            transcript.observe_hypothesis("the front fell off"),
+            "the front fell off"
+        );
     }
 
     #[test]
