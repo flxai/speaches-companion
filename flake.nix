@@ -145,6 +145,7 @@
         hotkey = mkSubcommandApp "hotkey" "Send a hotkey IPC command";
         inject = mkSubcommandApp "inject" "Type text into the focused X11 window";
         "read-aloud" = mkSubcommandApp "read-aloud" "Read selected text aloud through Speaches TTS";
+        "realtime-check" = mkSubcommandApp "realtime-check" "Check Speaches realtime WebSocket readiness";
         smoke = mkSubcommandApp "smoke" "Run a microphone and STT smoke test";
         transcribe = mkSubcommandApp "transcribe" "Transcribe an audio file";
       };

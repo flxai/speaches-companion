@@ -242,6 +242,17 @@ pub async fn preflight_health(base_url: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn check_realtime(base_url: &str, model: &str, language: Option<&str>) -> Result<()> {
+    preflight_health(base_url).await?;
+    RealtimeTranscriber::new(
+        base_url.to_string(),
+        model.to_string(),
+        language.map(str::to_string),
+    )
+    .warm_up()
+    .await
+}
+
 async fn stream_realtime_session_audio<S>(
     pcm_session: StreamingPcmSession,
     sample_rate: u32,
@@ -448,6 +459,10 @@ fn websocket_text(message: Message) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::Value;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
 
     #[test]
     fn realtime_transcript_accumulator_emits_full_running_text() {
@@ -484,5 +499,43 @@ mod tests {
         assert_eq!(chunks[1].len(), 3);
         assert_eq!(cursor, snapshot.len());
         assert!(realtime_audio_chunks_since(&snapshot, &mut cursor).is_empty());
+    }
+
+    #[tokio::test]
+    async fn realtime_warmup_sends_silence_and_commit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            let append = ws.next().await.unwrap().unwrap().into_text().unwrap();
+            let append: Value = serde_json::from_str(&append).unwrap();
+            assert_eq!(append["type"], "input_audio_buffer.append");
+            assert!(append["audio"].as_str().unwrap().len() > 100);
+
+            let commit = ws.next().await.unwrap().unwrap().into_text().unwrap();
+            let commit: Value = serde_json::from_str(&commit).unwrap();
+            assert_eq!(commit["type"], "input_audio_buffer.commit");
+
+            ws.send(Message::Text(
+                json!({
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "transcript": ""
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        });
+        let transcriber = RealtimeTranscriber::new(
+            format!("http://{address}"),
+            "model/name".to_string(),
+            Some("de".to_string()),
+        );
+
+        transcriber.warm_up().await.unwrap();
+
+        server.await.unwrap();
     }
 }

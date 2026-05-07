@@ -17,7 +17,7 @@ use speaches_scribe::notification::{
     READ_ALOUD_ERROR_SUMMARY,
 };
 use speaches_scribe::phase::PhaseResult;
-use speaches_scribe::realtime::{run_dictate_live, RealtimeTranscriber};
+use speaches_scribe::realtime::{check_realtime, run_dictate_live, RealtimeTranscriber};
 use speaches_scribe::streaming::{
     LiveTranscriber, RollingHttpTranscriber, StreamingDictationController,
 };
@@ -50,6 +50,7 @@ enum Command {
     Hotkey(HotkeyArgs),
     Inject(InjectArgs),
     ReadAloud(ReadAloudArgs),
+    RealtimeCheck(RealtimeCheckArgs),
     Smoke(SmokeArgs),
     Transcribe(TranscribeArgs),
 }
@@ -148,6 +149,18 @@ struct ReadAloudArgs {
 }
 
 #[derive(Debug, Args)]
+struct RealtimeCheckArgs {
+    #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long)]
+    base_url: Option<String>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    language: Option<String>,
+}
+
+#[derive(Debug, Args)]
 struct TranscribeArgs {
     audio: PathBuf,
     #[arg(long)]
@@ -208,6 +221,7 @@ async fn main() -> ExitCode {
         Command::Hotkey(args) => run_hotkey_command(args).await,
         Command::Inject(args) => run_inject_command(args).await,
         Command::ReadAloud(args) => run_read_aloud_command(args).await,
+        Command::RealtimeCheck(args) => run_realtime_check_command(args).await,
         Command::Smoke(args) => run_smoke_command(args).await,
         Command::Transcribe(args) => run_transcribe_command(args).await,
     }
@@ -543,6 +557,34 @@ where
     let body = format!("{error:#}");
     if let Err(notify_error) = notifier.notify_error(READ_ALOUD_ERROR_SUMMARY, &body) {
         eprintln!("speaches-scribe notification failed: {notify_error:#}");
+    }
+}
+
+async fn run_realtime_check_command(args: RealtimeCheckArgs) -> ExitCode {
+    let file_config = match load_command_file_config(args.config.clone()) {
+        Ok(file_config) => file_config,
+        Err(exit_code) => return exit_code,
+    };
+    let config = resolve_config(stt_config_input(
+        args.base_url,
+        args.model,
+        args.language,
+        &file_config,
+    ));
+
+    eprintln!(
+        "speaches-scribe checking Speaches health at {}",
+        config.base_url
+    );
+    match check_realtime(&config.base_url, &config.model, config.language.as_deref()).await {
+        Ok(()) => {
+            eprintln!("speaches-scribe realtime websocket ready");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("speaches-scribe realtime check failed: {error:#}");
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -984,6 +1026,32 @@ mod tests {
                 assert_eq!(args.player_args, ["--raw", "--rate", "24000"]);
             }
             _ => panic!("expected read-aloud command"),
+        }
+    }
+
+    #[test]
+    fn realtime_check_accepts_stt_options() {
+        match Cli::parse_from([
+            "speaches-scribe",
+            "realtime-check",
+            "--base-url",
+            "http://speaches.example:8000",
+            "--model",
+            "model/name",
+            "--language",
+            "de",
+        ])
+        .command
+        {
+            Command::RealtimeCheck(args) => {
+                assert_eq!(
+                    args.base_url.as_deref(),
+                    Some("http://speaches.example:8000")
+                );
+                assert_eq!(args.model.as_deref(), Some("model/name"));
+                assert_eq!(args.language.as_deref(), Some("de"));
+            }
+            _ => panic!("expected realtime-check command"),
         }
     }
 

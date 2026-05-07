@@ -35,6 +35,7 @@ nix run .#smoke -- --record-seconds 2 --response-format text
 nix run .#hotkey -- down
 nix run .#hotkey -- up
 nix run .#read-aloud -- --text "hello from Speaches"
+nix run .#realtime-check
 ```
 
 `speaches-scribe` reads configuration from
@@ -148,6 +149,16 @@ Speaches SSE transcription responses can be tested with:
 nix run . -- transcribe ./audio.wav --response-format text --stream
 nix run . -- daemon --stream-response
 ```
+
+Speaches realtime WebSocket readiness can be tested without recording from the
+microphone:
+
+```sh
+nix run .#realtime-check
+```
+
+This checks `/health`, opens `/v1/realtime?intent=transcription`, sends a short
+silent audio buffer, commits it, and waits for a transcription completion event.
 
 ## Development
 
