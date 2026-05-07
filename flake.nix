@@ -40,7 +40,7 @@
           ];
           postInstall = ''
             wrapProgram "$out/bin/speaches-scribe" \
-              --prefix PATH : ${lib.makeBinPath [pkgs.pipewire pkgs.xclip]}
+              --prefix PATH : ${lib.makeBinPath [pkgs.pipewire pkgs.sway pkgs.wtype pkgs.xclip]}
           '';
         });
 
@@ -143,7 +143,7 @@
         daemon = mkSubcommandApp "daemon" "Run the speaches-scribe hotkey daemon";
         "dictate-live" = mkSubcommandApp "dictate-live" "Run realtime dictation";
         hotkey = mkSubcommandApp "hotkey" "Send a hotkey IPC command";
-        inject = mkSubcommandApp "inject" "Type text into the focused X11 window";
+        inject = mkSubcommandApp "inject" "Type text into the focused desktop window";
         "read-aloud" = mkSubcommandApp "read-aloud" "Read selected text aloud through Speaches TTS";
         "realtime-check" = mkSubcommandApp "realtime-check" "Check Speaches realtime WebSocket readiness";
         smoke = mkSubcommandApp "smoke" "Run a microphone and STT smoke test";
@@ -162,6 +162,8 @@
           rust-analyzer
           rustc
           rustfmt
+          sway
+          wtype
           xclip
           xdotool
         ];

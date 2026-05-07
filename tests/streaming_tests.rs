@@ -351,13 +351,13 @@ async fn streaming_aborts_final_replacement_when_focus_changes() {
         .await
         .unwrap_err();
 
-    assert!(error.to_string().contains("focused X11 window changed"));
+    assert!(error.to_string().contains("focused desktop target changed"));
     assert!(operations.lock().unwrap().is_empty());
     assert_eq!(
         *errors.lock().unwrap(),
         vec![(
             DICTATION_ERROR_SUMMARY.to_string(),
-            "Final text replacement failed: focused X11 window changed from 1 to 2; aborting replacement".to_string()
+            "Final text replacement failed: focused desktop target changed from 1 to 2; aborting replacement".to_string()
         )]
     );
 }

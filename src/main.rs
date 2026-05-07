@@ -10,11 +10,11 @@ use speaches_scribe::config::{
     TtsConfigInput,
 };
 use speaches_scribe::daemon::run_daemon;
-use speaches_scribe::inject::{LibXdoTextInjector, TextInjector};
+use speaches_scribe::inject::{DesktopTextInjector, TextInjector};
 use speaches_scribe::ipc::{default_socket_path, send_command, IpcCommand};
 use speaches_scribe::notification::{
-    DesktopErrorNotifier, ErrorNotifier, NoopTranscriptNotifier, HOTKEY_ERROR_SUMMARY,
-    READ_ALOUD_ERROR_SUMMARY,
+    DesktopErrorNotifier, ErrorNotifier, NoopErrorNotifier, NoopTranscriptNotifier,
+    HOTKEY_ERROR_SUMMARY, READ_ALOUD_ERROR_SUMMARY,
 };
 use speaches_scribe::phase::PhaseResult;
 use speaches_scribe::realtime::{check_realtime, run_dictate_live, RealtimeTranscriber};
@@ -337,12 +337,12 @@ async fn run_streaming_daemon<L>(
 where
     L: LiveTranscriber + 'static,
 {
-    let injector = LibXdoTextInjector::default();
+    let injector = DesktopTextInjector::default();
     let controller = StreamingDictationController::new_with_notifiers(
         transcriber,
         injector,
         NoopTranscriptNotifier,
-        DesktopErrorNotifier,
+        NoopErrorNotifier,
     )
     .with_listening_marker(daemon_settings.listening_marker)
     .with_inline_partials(daemon_settings.inline_partials);
@@ -484,7 +484,7 @@ where
 }
 
 async fn run_inject_command(args: InjectArgs) -> ExitCode {
-    let injector = LibXdoTextInjector::new(args.delay_microsecs);
+    let injector = DesktopTextInjector::new(args.delay_microsecs);
     match injector.inject_text(&args.text) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

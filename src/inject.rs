@@ -1,6 +1,11 @@
 use std::ffi::CString;
+use std::io::Write;
+use std::os::unix::fs::FileTypeExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FocusedWindow(pub u64);
@@ -23,6 +28,84 @@ pub trait TextInjector: Send + Sync {
 
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
         Ok(None)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DesktopTextInjector {
+    delay_microsecs: u32,
+}
+
+impl DesktopTextInjector {
+    pub fn new(delay_microsecs: u32) -> Self {
+        Self { delay_microsecs }
+    }
+
+    fn backend(&self) -> DesktopTextBackend {
+        if let Some(injector) = SwayTextInjector::detect(self.delay_microsecs) {
+            DesktopTextBackend::Sway(injector)
+        } else {
+            DesktopTextBackend::X11(LibXdoTextInjector::new(self.delay_microsecs))
+        }
+    }
+}
+
+impl Default for DesktopTextInjector {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+enum DesktopTextBackend {
+    Sway(SwayTextInjector),
+    X11(LibXdoTextInjector),
+}
+
+impl TextInjector for DesktopTextBackend {
+    fn inject_text(&self, text: &str) -> anyhow::Result<()> {
+        match self {
+            Self::Sway(injector) => injector.inject_text(text),
+            Self::X11(injector) => injector.inject_text(text),
+        }
+    }
+
+    fn erase_chars(&self, count: usize) -> anyhow::Result<()> {
+        match self {
+            Self::Sway(injector) => injector.erase_chars(count),
+            Self::X11(injector) => injector.erase_chars(count),
+        }
+    }
+
+    fn replace_tail(&self, erase_count: usize, text_suffix: &str) -> anyhow::Result<()> {
+        match self {
+            Self::Sway(injector) => injector.replace_tail(erase_count, text_suffix),
+            Self::X11(injector) => injector.replace_tail(erase_count, text_suffix),
+        }
+    }
+
+    fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
+        match self {
+            Self::Sway(injector) => injector.focused_window(),
+            Self::X11(injector) => injector.focused_window(),
+        }
+    }
+}
+
+impl TextInjector for DesktopTextInjector {
+    fn inject_text(&self, text: &str) -> anyhow::Result<()> {
+        self.backend().inject_text(text)
+    }
+
+    fn erase_chars(&self, count: usize) -> anyhow::Result<()> {
+        self.backend().erase_chars(count)
+    }
+
+    fn replace_tail(&self, erase_count: usize, text_suffix: &str) -> anyhow::Result<()> {
+        self.backend().replace_tail(erase_count, text_suffix)
+    }
+
+    fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
+        self.backend().focused_window()
     }
 }
 
@@ -81,6 +164,222 @@ impl TextInjector for LibXdoTextInjector {
         }
         Ok(Some(FocusedWindow(window)))
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct SwayTextInjector {
+    delay_millis: u32,
+    sway_socket: PathBuf,
+    wayland_display: Option<String>,
+    swaymsg_path: PathBuf,
+    wtype_path: PathBuf,
+}
+
+impl SwayTextInjector {
+    pub fn detect(delay_microsecs: u32) -> Option<Self> {
+        let sway_socket = default_sway_socket_path()?;
+        let wayland_display =
+            default_wayland_display().or_else(|| wayland_display_from_sway_process(&sway_socket));
+        Some(Self {
+            delay_millis: delay_microsecs.div_ceil(1000),
+            sway_socket,
+            wayland_display,
+            swaymsg_path: PathBuf::from("swaymsg"),
+            wtype_path: PathBuf::from("wtype"),
+        })
+    }
+
+    fn swaymsg_command(&self) -> Command {
+        let mut command = Command::new(&self.swaymsg_path);
+        command.arg("-s").arg(&self.sway_socket);
+        command
+    }
+
+    fn wtype_command(&self) -> Command {
+        let mut command = Command::new(&self.wtype_path);
+        if let Some(wayland_display) = self.wayland_display.as_ref() {
+            command.env("WAYLAND_DISPLAY", wayland_display);
+        }
+        command
+    }
+
+    fn run_wtype_with_text(&self, text: &str) -> anyhow::Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+
+        let mut command = self.wtype_command();
+        if self.delay_millis > 0 {
+            command.arg("-d").arg(self.delay_millis.to_string());
+        }
+        command.arg("-");
+        command.stdin(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to start {}", self.wtype_path.display()))?;
+        let mut stdin = child.stdin.take().context("failed to open wtype stdin")?;
+        stdin
+            .write_all(text.as_bytes())
+            .context("failed to send text to wtype")?;
+        drop(stdin);
+        let status = child.wait().context("failed to wait for wtype")?;
+        if !status.success() {
+            bail!("wtype failed with status {status}");
+        }
+        Ok(())
+    }
+
+    fn run_wtype_keys(&self, key: &str, count: usize) -> anyhow::Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+
+        let mut command = self.wtype_command();
+        if self.delay_millis > 0 {
+            command.arg("-d").arg(self.delay_millis.to_string());
+        }
+        for _ in 0..count {
+            command.arg("-k").arg(key);
+        }
+        let status = command
+            .status()
+            .with_context(|| format!("failed to start {}", self.wtype_path.display()))?;
+        if !status.success() {
+            bail!("wtype key injection failed with status {status}");
+        }
+        Ok(())
+    }
+}
+
+impl TextInjector for SwayTextInjector {
+    fn inject_text(&self, text: &str) -> anyhow::Result<()> {
+        self.run_wtype_with_text(text)
+            .context("sway/wtype text injection failed")
+    }
+
+    fn erase_chars(&self, count: usize) -> anyhow::Result<()> {
+        self.run_wtype_keys("BackSpace", count)
+            .context("sway/wtype text erasure failed")
+    }
+
+    fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
+        let output = self
+            .swaymsg_command()
+            .arg("-r")
+            .arg("-t")
+            .arg("get_tree")
+            .output()
+            .context("failed to run swaymsg get_tree")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "swaymsg get_tree failed with status {}: {stderr}",
+                output.status
+            );
+        }
+
+        let tree: Value =
+            serde_json::from_slice(&output.stdout).context("failed to parse sway tree JSON")?;
+        let focused_id = focused_sway_node_id(&tree).context("failed to find focused Sway node")?;
+        Ok(Some(FocusedWindow(focused_id)))
+    }
+}
+
+fn default_sway_socket_path() -> Option<PathBuf> {
+    std::env::var_os("SWAYSOCK")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && path.exists())
+        .or_else(|| {
+            let runtime_dir = runtime_dir()?;
+            newest_socket_matching(&runtime_dir, |name| {
+                name.starts_with("sway-ipc.") && name.ends_with(".sock")
+            })
+        })
+}
+
+fn default_wayland_display() -> Option<String> {
+    std::env::var("WAYLAND_DISPLAY")
+        .ok()
+        .filter(|display| !display.is_empty())
+}
+
+fn wayland_display_from_sway_process(sway_socket: &Path) -> Option<String> {
+    let pid = sway_pid_from_socket_path(sway_socket)?;
+    let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    environ
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| std::str::from_utf8(entry).ok())
+        .find_map(|entry| entry.strip_prefix("WAYLAND_DISPLAY="))
+        .filter(|display| !display.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn sway_pid_from_socket_path(sway_socket: &Path) -> Option<u32> {
+    let file_name = sway_socket.file_name()?.to_str()?;
+    let mut parts = file_name.split('.');
+    match (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) {
+        (Some("sway-ipc"), Some(_uid), Some(pid), Some("sock"), None) => pid.parse().ok(),
+        _ => None,
+    }
+}
+
+fn runtime_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+fn newest_socket_matching(
+    directory: &Path,
+    matches_name: impl Fn(&str) -> bool,
+) -> Option<PathBuf> {
+    std::fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if !matches_name(name) {
+                return None;
+            }
+            let metadata = entry.metadata().ok()?;
+            if !metadata.file_type().is_socket() {
+                return None;
+            }
+            let modified = metadata.modified().ok();
+            Some((entry.path(), modified))
+        })
+        .max_by_key(|(_, modified)| *modified)
+        .map(|(path, _)| path)
+}
+
+fn focused_sway_node_id(value: &Value) -> Option<u64> {
+    if value
+        .get("focused")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return value.get("id").and_then(Value::as_u64);
+    }
+
+    for child_key in ["nodes", "floating_nodes"] {
+        let Some(children) = value.get(child_key).and_then(Value::as_array) else {
+            continue;
+        };
+        for child in children {
+            if let Some(id) = focused_sway_node_id(child) {
+                return Some(id);
+            }
+        }
+    }
+
+    None
 }
 
 struct RawXdo {
@@ -271,12 +570,12 @@ where
         };
         let Some(current_window) = self.injector.focused_window()? else {
             self.abort();
-            bail!("active X11 window is unavailable; aborting replacement");
+            bail!("focused desktop target is unavailable; aborting replacement");
         };
         if current_window != target_window {
             self.abort();
             bail!(
-                "focused X11 window changed from {} to {}; aborting replacement",
+                "focused desktop target changed from {} to {}; aborting replacement",
                 target_window.0,
                 current_window.0
             );
@@ -309,6 +608,8 @@ pub fn normalize_transcript_for_injection(transcript: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+
+    use serde_json::json;
 
     use super::*;
 
@@ -400,6 +701,70 @@ mod tests {
         assert_eq!(
             *replacements.lock().unwrap(),
             vec![(0, "💬".to_string()), (1, "hello".to_string())]
+        );
+    }
+
+    #[test]
+    fn focused_sway_node_id_finds_nested_focused_node() {
+        let tree = json!({
+            "id": 1,
+            "focused": false,
+            "nodes": [{
+                "id": 2,
+                "focused": false,
+                "nodes": [{
+                    "id": 3,
+                    "focused": true,
+                    "nodes": []
+                }],
+                "floating_nodes": []
+            }],
+            "floating_nodes": []
+        });
+
+        assert_eq!(focused_sway_node_id(&tree), Some(3));
+    }
+
+    #[test]
+    fn focused_sway_node_id_checks_floating_nodes() {
+        let tree = json!({
+            "id": 1,
+            "focused": false,
+            "nodes": [],
+            "floating_nodes": [{
+                "id": 4,
+                "focused": true
+            }]
+        });
+
+        assert_eq!(focused_sway_node_id(&tree), Some(4));
+    }
+
+    #[test]
+    fn focused_sway_node_id_returns_none_without_focus() {
+        let tree = json!({
+            "id": 1,
+            "focused": false,
+            "nodes": [{"id": 2, "focused": false}],
+            "floating_nodes": []
+        });
+
+        assert_eq!(focused_sway_node_id(&tree), None);
+    }
+
+    #[test]
+    fn sway_pid_from_socket_path_parses_standard_socket_name() {
+        assert_eq!(
+            sway_pid_from_socket_path(Path::new("/run/user/1001/sway-ipc.1001.77911.sock")),
+            Some(77911)
+        );
+    }
+
+    #[test]
+    fn sway_pid_from_socket_path_rejects_other_socket_names() {
+        assert_eq!(
+            sway_pid_from_socket_path(Path::new("/run/user/1001/wayland-1")),
+            None
         );
     }
 

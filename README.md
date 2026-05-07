@@ -91,10 +91,10 @@ response format needs player-specific options, for example raw PCM playback.
 The daemon defaults to rolling HTTP dictation: while the hotkey is held, audio
 is recorded and partial transcripts are collected. On release, the full
 recording is sent to Speaches, transcribed, and injected into the focused X11
-window. Set `realtime_partials = true` to use Speaches' realtime WebSocket path
-for live partials instead of repeated HTTP snapshots. If focus changes during a
-recording, `speaches-scribe` stops editing the target window instead of sending
-Backspaces to the wrong place.
+or Sway window. Set `realtime_partials = true` to use Speaches' realtime
+WebSocket path for live partials instead of repeated HTTP snapshots. If focus
+changes during a recording, `speaches-scribe` stops editing the target window
+instead of sending Backspaces to the wrong place.
 
 On startup the daemon starts continuous `pw-record` capture before it accepts
 hotkey-driven dictation. If that capture cannot start, daemon startup fails
@@ -104,9 +104,9 @@ keeps a rolling pre-roll window for recovery/debugging, but STT requests use a
 short capped pre-roll view with leading and trailing silence trimmed. When a
 recording starts, treat the listening marker as the ready-to-speak signal.
 
-Text payloads are injected through libxdo text entry with active modifiers
-temporarily cleared. Speculative replacement uses Backspace for the portion that
-changed.
+Text payloads are injected through Sway/wtype when a Sway IPC socket is
+available, otherwise through libxdo text entry with active modifiers temporarily
+cleared. Speculative replacement uses Backspace for the portion that changed.
 
 Inline partial injection is enabled by default. If the trigger binding keeps a
 modifier physically held while dictating, such as some i3 `$sup+d` bindings,
@@ -162,7 +162,10 @@ silent audio buffer, commits it, and waits for a transcription completion event.
 
 ## Development
 
-`speaches-scribe` links to `libxdo`, so raw `cargo run` needs the Nix development shell:
+`speaches-scribe` links to `libxdo`. On NixOS, plain `cargo run --` works when
+`xdotool` is installed in the current system profile; Sway injection also needs
+`swaymsg` and `wtype` in `PATH`. For a fully provisioned development
+environment, use the Nix shell:
 
 ```sh
 nix develop -c cargo run -- --help
