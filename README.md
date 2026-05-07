@@ -68,8 +68,6 @@ realtime_partials = false
 listening_marker = "💬"
 inline_partials = true
 append_space = true
-partial_interval_ms = 1250
-partial_min_duration_ms = 0
 leading_silence_ms = 250
 preroll_ms = 750
 ```
@@ -89,13 +87,11 @@ Use `--speed`, `SPEACHES_SCRIBE_TTS_SPEED`, or `tts.speed` to adjust speech
 rate. Use repeated `--player-arg` flags or `tts.player_args` when the selected
 response format needs player-specific options, for example raw PCM playback.
 
-The daemon defaults to rolling HTTP dictation: while the hotkey is held, audio
-is recorded and partial transcripts are collected. On release, the full
-recording is sent to Speaches, transcribed, and injected into the focused X11
-or Sway window. Set `realtime_partials = true` to use Speaches' realtime
-WebSocket path for live partials instead of repeated HTTP snapshots. If focus
-changes during a recording, `speaches-scribe` stops editing the target window
-instead of sending Backspaces to the wrong place.
+By default, the daemon records while the hotkey is held and sends one final
+transcription request to Speaches on release. Set `realtime_partials = true` to
+use Speaches' realtime WebSocket path for live partials while recording. If
+focus changes during a recording, `speaches-scribe` stops editing the target
+window instead of sending Backspaces to the wrong place.
 
 On startup the daemon starts continuous `pw-record` capture before it accepts
 hotkey-driven dictation. If that capture cannot start, daemon startup fails

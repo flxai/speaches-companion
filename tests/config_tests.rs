@@ -176,8 +176,6 @@ realtime_partials = true
 listening_marker = "..."
 inline_partials = false
 append_space = false
-partial_interval_ms = 750
-partial_min_duration_ms = 100
 leading_silence_ms = 400
 preroll_ms = 1000
 "#,
@@ -207,8 +205,6 @@ preroll_ms = 1000
     assert_eq!(config.dictation.listening_marker.as_deref(), Some("..."));
     assert_eq!(config.dictation.inline_partials, Some(false));
     assert_eq!(config.dictation.append_space, Some(false));
-    assert_eq!(config.dictation.partial_interval_ms, Some(750));
-    assert_eq!(config.dictation.partial_min_duration_ms, Some(100));
     assert_eq!(config.dictation.leading_silence_ms, Some(400));
     assert_eq!(config.dictation.preroll_ms, Some(1000));
 }

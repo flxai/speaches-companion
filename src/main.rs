@@ -19,7 +19,7 @@ use speaches_scribe::notification::{
 use speaches_scribe::phase::PhaseResult;
 use speaches_scribe::realtime::{check_realtime, run_dictate_live, RealtimeTranscriber};
 use speaches_scribe::streaming::{
-    LiveTranscriber, RollingHttpTranscriber, StreamingDictationController,
+    FinalHttpTranscriber, LiveTranscriber, StreamingDictationController,
 };
 use speaches_scribe::stt::{transcribe_file, ResponseFormat, TranscribeOptions};
 use speaches_scribe::tts::{
@@ -28,8 +28,6 @@ use speaches_scribe::tts::{
 };
 
 const DEFAULT_LISTENING_MARKER: &str = "💬";
-const DEFAULT_PARTIAL_INTERVAL_MS: u64 = 1250;
-const DEFAULT_PARTIAL_MIN_DURATION_MS: u64 = 0;
 const DEFAULT_LEADING_SILENCE_MS: u64 = 250;
 const DEFAULT_PREROLL_MS: u64 = 750;
 
@@ -89,10 +87,6 @@ struct DaemonArgs {
     append_space: bool,
     #[arg(long)]
     no_append_space: bool,
-    #[arg(long)]
-    partial_interval_ms: Option<u64>,
-    #[arg(long)]
-    partial_min_duration_ms: Option<u64>,
     #[arg(long)]
     leading_silence_ms: Option<u64>,
     #[arg(long)]
@@ -263,7 +257,7 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
             }
         }
     } else {
-        let transcriber = RollingHttpTranscriber::new(
+        let transcriber = FinalHttpTranscriber::new(
             config.base_url,
             TranscribeOptions {
                 model: config.model,
@@ -275,10 +269,6 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
                 stream: daemon_settings.stream_response,
             },
         )
-        .with_partial_interval(Duration::from_millis(daemon_settings.partial_interval_ms))
-        .with_partial_min_duration(Duration::from_millis(
-            daemon_settings.partial_min_duration_ms,
-        ))
         .with_leading_silence(Duration::from_millis(daemon_settings.leading_silence_ms))
         .with_preroll(Duration::from_millis(daemon_settings.preroll_ms))
         .with_transcript_dir(daemon_settings.transcript_dir.clone());
@@ -373,8 +363,6 @@ struct DaemonSettings {
     listening_marker: Option<String>,
     inline_partials: bool,
     append_space: bool,
-    partial_interval_ms: u64,
-    partial_min_duration_ms: u64,
     leading_silence_ms: u64,
     preroll_ms: u64,
 }
@@ -390,14 +378,6 @@ fn resolve_daemon_settings(args: &DaemonArgs, file_config: &FileConfig) -> Daemo
         listening_marker: resolve_listening_marker(args, file_config),
         inline_partials: resolve_inline_partials(args, file_config),
         append_space: resolve_append_space(args, file_config),
-        partial_interval_ms: args
-            .partial_interval_ms
-            .or(file_config.dictation.partial_interval_ms)
-            .unwrap_or(DEFAULT_PARTIAL_INTERVAL_MS),
-        partial_min_duration_ms: args
-            .partial_min_duration_ms
-            .or(file_config.dictation.partial_min_duration_ms)
-            .unwrap_or(DEFAULT_PARTIAL_MIN_DURATION_MS),
         leading_silence_ms: args
             .leading_silence_ms
             .or(file_config.dictation.leading_silence_ms)
@@ -893,8 +873,6 @@ mod tests {
                 listening_marker: Some("...".to_string()),
                 inline_partials: Some(false),
                 append_space: Some(false),
-                partial_interval_ms: Some(750),
-                partial_min_duration_ms: Some(100),
                 leading_silence_ms: Some(400),
                 preroll_ms: Some(1_000),
             },
@@ -909,8 +887,6 @@ mod tests {
         assert_eq!(settings.listening_marker, Some("...".to_string()));
         assert!(!settings.inline_partials);
         assert!(!settings.append_space);
-        assert_eq!(settings.partial_interval_ms, 750);
-        assert_eq!(settings.partial_min_duration_ms, 100);
         assert_eq!(settings.leading_silence_ms, 400);
         assert_eq!(settings.preroll_ms, 1_000);
     }

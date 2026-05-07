@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use async_trait::async_trait;
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
 use crate::audio::{
@@ -33,7 +33,6 @@ const TRIM_MIN_SPEECH: Duration = Duration::from_millis(120);
 const FIXED_SPEECH_RMS_FLOOR: f64 = 700.0;
 const MAX_SPEECH_RMS_FLOOR: f64 = 1_500.0;
 const NOISE_FLOOR_MULTIPLIER: f64 = 4.0;
-const SEGMENT_READY_SILENCE: Duration = Duration::from_millis(800);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveTranscriptUpdate {
@@ -375,41 +374,27 @@ where
 }
 
 #[derive(Clone)]
-pub struct RollingHttpTranscriber {
+pub struct FinalHttpTranscriber {
     base_url: String,
     options: TranscribeOptions,
     capture: Arc<Mutex<Option<StreamingPcmCapture>>>,
     transcript_dir: Option<PathBuf>,
-    partial_interval: Duration,
-    partial_min_duration: Duration,
     leading_silence: Duration,
     preroll: Duration,
     sample_rate: u32,
 }
 
-impl RollingHttpTranscriber {
+impl FinalHttpTranscriber {
     pub fn new(base_url: String, options: TranscribeOptions) -> Self {
         Self {
             base_url,
             options,
             capture: Arc::new(Mutex::new(None)),
             transcript_dir: None,
-            partial_interval: Duration::from_millis(1_250),
-            partial_min_duration: Duration::ZERO,
             leading_silence: Duration::from_millis(250),
             preroll: Duration::from_millis(750),
             sample_rate: STT_SAMPLE_RATE,
         }
-    }
-
-    pub fn with_partial_interval(mut self, interval: Duration) -> Self {
-        self.partial_interval = interval.max(Duration::from_millis(1));
-        self
-    }
-
-    pub fn with_partial_min_duration(mut self, duration: Duration) -> Self {
-        self.partial_min_duration = duration;
-        self
     }
 
     pub fn with_leading_silence(mut self, duration: Duration) -> Self {
@@ -465,15 +450,13 @@ impl RollingHttpTranscriber {
     }
 }
 
-pub struct RollingHttpSession {
+pub struct FinalHttpSession {
     session_pcm: StreamingPcmSession,
-    stop_partials: watch::Sender<bool>,
-    partial_task: JoinHandle<()>,
 }
 
 #[async_trait]
-impl LiveTranscriber for RollingHttpTranscriber {
-    type Session = RollingHttpSession;
+impl LiveTranscriber for FinalHttpTranscriber {
+    type Session = FinalHttpSession;
 
     async fn start(&self) -> anyhow::Result<LiveTranscriptionSession<Self::Session>> {
         let shared_pcm = self.ensure_capture_started().await?;
@@ -485,35 +468,15 @@ impl LiveTranscriber for RollingHttpTranscriber {
             pcm_duration(self.sample_rate, session_pcm.retained_preroll_bytes()).as_secs_f64(),
             self.preroll.as_millis()
         );
-        let (updates_tx, updates_rx) = mpsc::channel(8);
-        let (stop_tx, stop_rx) = watch::channel(false);
-        let partial_task = tokio::spawn(run_partial_transcriptions(PartialTranscriptionLoop {
-            session_pcm: session_pcm.clone(),
-            stop_rx,
-            updates_tx,
-            base_url: self.base_url.clone(),
-            options: self.options.clone(),
-            sample_rate: self.sample_rate,
-            interval: self.partial_interval,
-            min_duration: self.partial_min_duration,
-            leading_silence: self.leading_silence,
-            transcript_dir: self.transcript_dir.clone(),
-        }));
+        let (_updates_tx, updates_rx) = mpsc::channel(1);
 
         Ok(LiveTranscriptionSession {
-            session: RollingHttpSession {
-                session_pcm,
-                stop_partials: stop_tx,
-                partial_task,
-            },
+            session: FinalHttpSession { session_pcm },
             updates: updates_rx,
         })
     }
 
     async fn stop(&self, session: Self::Session) -> anyhow::Result<String> {
-        let _ = session.stop_partials.send(true);
-        drop(session.partial_task);
-
         let raw_pcm = session.session_pcm.snapshot().await;
         session.session_pcm.finish().await;
         if raw_pcm.is_empty() {
@@ -553,243 +516,6 @@ impl LiveTranscriber for RollingHttpTranscriber {
             }
         }
         Ok(transcript)
-    }
-}
-
-struct PartialTranscriptionLoop {
-    session_pcm: StreamingPcmSession,
-    stop_rx: watch::Receiver<bool>,
-    updates_tx: mpsc::Sender<LiveTranscriptUpdate>,
-    base_url: String,
-    options: TranscribeOptions,
-    sample_rate: u32,
-    interval: Duration,
-    min_duration: Duration,
-    leading_silence: Duration,
-    transcript_dir: Option<PathBuf>,
-}
-
-struct PartialTranscriptionRequest {
-    request_id: u64,
-    pcm: Vec<u8>,
-    audio_duration: Duration,
-    leading_trim: Duration,
-    trailing_trim: Duration,
-    trailing_silence: Duration,
-}
-
-struct PartialTranscriptionResult {
-    audio_duration: Duration,
-    result: anyhow::Result<Option<String>>,
-}
-
-async fn run_partial_transcriptions(loop_config: PartialTranscriptionLoop) {
-    let PartialTranscriptionLoop {
-        session_pcm,
-        mut stop_rx,
-        updates_tx,
-        base_url,
-        options,
-        sample_rate,
-        interval,
-        min_duration,
-        leading_silence,
-        transcript_dir,
-    } = loop_config;
-    let min_bytes = pcm_bytes_for_duration(sample_rate, min_duration);
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut stabilizer = PartialTranscriptStabilizer::new(min_duration);
-    let (result_tx, mut result_rx) = mpsc::channel::<PartialTranscriptionResult>(8);
-    let mut latest_request_id = 0u64;
-    let mut active_request: Option<JoinHandle<()>> = None;
-    let mut pending_request: Option<PartialTranscriptionRequest> = None;
-
-    loop {
-        tokio::select! {
-            changed = stop_rx.changed() => {
-                if changed.is_err() || *stop_rx.borrow() {
-                    break;
-                }
-            }
-            Some(partial_result) = result_rx.recv() => {
-                active_request = None;
-                let mut updates_closed = false;
-                match partial_result.result {
-                    Ok(Some(transcript)) => {
-                        if let Some(transcript) = normalize_transcript_for_injection(&transcript) {
-                            if let Some(transcript) =
-                                stabilizer.observe(partial_result.audio_duration, &transcript)
-                            {
-                                if let Some(transcript_dir) = transcript_dir.as_deref() {
-                                    match preserve_transcript_snapshot(
-                                        transcript_dir,
-                                        &transcript,
-                                        "partial",
-                                    )
-                                    .await
-                                    {
-                                        Ok(path) => eprintln!(
-                                            "speaches-scribe preserved partial transcript at {}",
-                                            path.display()
-                                        ),
-                                        Err(error) => eprintln!(
-                                            "speaches-scribe failed to preserve partial transcript: {error:#}"
-                                        ),
-                                    }
-                                }
-                                if updates_tx
-                                    .send(LiveTranscriptUpdate { transcript })
-                                    .await
-                                    .is_err()
-                                {
-                                    updates_closed = true;
-                                }
-                            }
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(error) => eprintln!("speaches-scribe partial transcription failed: {error:#}"),
-                }
-                if updates_closed {
-                    break;
-                }
-                if let Some(request) = pending_request.take() {
-                    active_request = Some(spawn_partial_transcription_request(
-                        request,
-                        result_tx.clone(),
-                        &base_url,
-                        &options,
-                        sample_rate,
-                        leading_silence,
-                        &stop_rx,
-                    ));
-                }
-            }
-            _ = ticker.tick() => {
-                let pcm = session_pcm.snapshot().await;
-                let Some(request) = build_partial_transcription_request(
-                    sample_rate,
-                    &pcm,
-                    min_bytes,
-                    latest_request_id.saturating_add(1),
-                ) else {
-                    continue;
-                };
-                if request.trailing_silence >= SEGMENT_READY_SILENCE {
-                    eprintln!(
-                        "speaches-scribe partial audio has {:.2}s trailing silence; future segment boundary candidate",
-                        request.trailing_silence.as_secs_f64()
-                    );
-                }
-                if request.leading_trim > Duration::ZERO
-                    || request.trailing_trim > Duration::ZERO
-                {
-                    eprintln!(
-                        "speaches-scribe partial audio sent: {:.2}s after trimming {:.2}s leading / {:.2}s trailing",
-                        request.audio_duration.as_secs_f64(),
-                        request.leading_trim.as_secs_f64(),
-                        request.trailing_trim.as_secs_f64()
-                    );
-                }
-                latest_request_id = request.request_id;
-                if active_request.is_some() {
-                    pending_request = Some(request);
-                    continue;
-                }
-                active_request = Some(spawn_partial_transcription_request(
-                    request,
-                    result_tx.clone(),
-                    &base_url,
-                    &options,
-                    sample_rate,
-                    leading_silence,
-                    &stop_rx,
-                ));
-            }
-        }
-    }
-
-    if let Some(active_request) = active_request {
-        active_request.abort();
-    }
-}
-
-fn spawn_partial_transcription_request(
-    request: PartialTranscriptionRequest,
-    result_tx: mpsc::Sender<PartialTranscriptionResult>,
-    base_url: &str,
-    options: &TranscribeOptions,
-    sample_rate: u32,
-    leading_silence: Duration,
-    stop_rx: &watch::Receiver<bool>,
-) -> JoinHandle<()> {
-    let request_base_url = base_url.to_string();
-    let request_options = options.clone();
-    let mut request_stop_rx = stop_rx.clone();
-    tokio::spawn(async move {
-        let result = transcribe_pcm_snapshot_until_stop(
-            &request_base_url,
-            &request_options,
-            sample_rate,
-            &request.pcm,
-            "partial",
-            leading_silence,
-            &mut request_stop_rx,
-        )
-        .await;
-        let _ = result_tx
-            .send(PartialTranscriptionResult {
-                audio_duration: request.audio_duration,
-                result,
-            })
-            .await;
-    })
-}
-
-async fn transcribe_pcm_snapshot_until_stop(
-    base_url: &str,
-    options: &TranscribeOptions,
-    sample_rate: u32,
-    pcm: &[u8],
-    label: &str,
-    leading_silence: Duration,
-    stop_rx: &mut watch::Receiver<bool>,
-) -> anyhow::Result<Option<String>> {
-    let path = temp_audio_path(label);
-    let pcm = pcm_with_leading_silence(sample_rate, leading_silence, pcm);
-    write_pcm_wav(&path, &pcm, sample_rate).await?;
-    let snapshot_result = {
-        let transcribe = transcribe_file(base_url, &path, options);
-        tokio::pin!(transcribe);
-        tokio::select! {
-            result = &mut transcribe => Some(result),
-            changed = stop_rx.changed() => {
-                let _ = changed;
-                None
-            }
-        }
-    };
-    let cleanup_result = tokio::fs::remove_file(&path)
-        .await
-        .with_context(|| format!("failed to remove {}", path.display()));
-
-    match (snapshot_result, cleanup_result) {
-        (None, Ok(())) => Ok(None),
-        (None, Err(error)) => {
-            eprintln!("{error:#}");
-            Ok(None)
-        }
-        (Some(Ok(transcript)), Ok(())) => Ok(Some(transcript)),
-        (Some(Ok(transcript)), Err(error)) => {
-            eprintln!("{error:#}");
-            Ok(Some(transcript))
-        }
-        (Some(Err(error)), Ok(())) => Err(error),
-        (Some(Err(error)), Err(cleanup_error)) => {
-            eprintln!("{cleanup_error:#}");
-            Err(error)
-        }
     }
 }
 
@@ -838,7 +564,6 @@ struct SpeechTrim {
     leading_trim: Duration,
     trailing_trim: Duration,
     trailing_silence: Duration,
-    detected_speech: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -859,32 +584,6 @@ fn build_final_transcription_audio(sample_rate: u32, pcm: &[u8]) -> Transcriptio
     }
 }
 
-fn build_partial_transcription_request(
-    sample_rate: u32,
-    pcm: &[u8],
-    min_bytes: usize,
-    request_id: u64,
-) -> Option<PartialTranscriptionRequest> {
-    if pcm.is_empty() {
-        return None;
-    }
-
-    let trim = trim_pcm_to_speech(sample_rate, pcm);
-    if !trim.detected_speech || trim.pcm.len() < min_bytes {
-        return None;
-    }
-
-    let audio_duration = pcm_duration(sample_rate, trim.pcm.len());
-    Some(PartialTranscriptionRequest {
-        request_id,
-        pcm: trim.pcm,
-        audio_duration,
-        leading_trim: trim.leading_trim,
-        trailing_trim: trim.trailing_trim,
-        trailing_silence: trim.trailing_silence,
-    })
-}
-
 fn trim_pcm_to_speech(sample_rate: u32, pcm: &[u8]) -> SpeechTrim {
     let frames = rms_frames(sample_rate, pcm);
     if frames.is_empty() {
@@ -893,7 +592,6 @@ fn trim_pcm_to_speech(sample_rate: u32, pcm: &[u8]) -> SpeechTrim {
             leading_trim: Duration::ZERO,
             trailing_trim: Duration::ZERO,
             trailing_silence: Duration::ZERO,
-            detected_speech: false,
         };
     }
 
@@ -904,7 +602,6 @@ fn trim_pcm_to_speech(sample_rate: u32, pcm: &[u8]) -> SpeechTrim {
             leading_trim: Duration::ZERO,
             trailing_trim: Duration::ZERO,
             trailing_silence: pcm_duration(sample_rate, pcm.len()),
-            detected_speech: false,
         };
     };
     let last_speech = frames
@@ -921,7 +618,6 @@ fn trim_pcm_to_speech(sample_rate: u32, pcm: &[u8]) -> SpeechTrim {
             leading_trim: Duration::ZERO,
             trailing_trim: Duration::ZERO,
             trailing_silence: pcm_duration(sample_rate, pcm.len().saturating_sub(speech_end)),
-            detected_speech: false,
         };
     }
 
@@ -935,7 +631,6 @@ fn trim_pcm_to_speech(sample_rate: u32, pcm: &[u8]) -> SpeechTrim {
         leading_trim: pcm_duration(sample_rate, padded_start),
         trailing_trim: pcm_duration(sample_rate, pcm.len().saturating_sub(padded_end)),
         trailing_silence: pcm_duration(sample_rate, pcm.len().saturating_sub(speech_end)),
-        detected_speech: true,
     }
 }
 
@@ -1019,101 +714,6 @@ fn audio_file_name(label: &str) -> String {
     )
 }
 
-#[derive(Debug, Clone)]
-struct PartialTranscriptStabilizer {
-    previous_candidate: Option<String>,
-    last_emitted: String,
-    min_duration: Duration,
-    min_chars: usize,
-}
-
-impl PartialTranscriptStabilizer {
-    fn new(min_duration: Duration) -> Self {
-        Self {
-            previous_candidate: None,
-            last_emitted: String::new(),
-            min_duration,
-            min_chars: 4,
-        }
-    }
-
-    fn observe(&mut self, audio_duration: Duration, candidate: &str) -> Option<String> {
-        if audio_duration < self.min_duration {
-            return None;
-        }
-        let candidate = candidate.trim();
-        if candidate.chars().count() < self.min_chars {
-            return None;
-        }
-
-        if self.min_duration == Duration::ZERO {
-            self.previous_candidate = Some(candidate.to_string());
-            if candidate == self.last_emitted {
-                return None;
-            }
-            self.last_emitted = candidate.to_string();
-            return Some(candidate.to_string());
-        }
-
-        let stable = self
-            .previous_candidate
-            .as_deref()
-            .and_then(|previous| common_word_prefix(previous, candidate));
-        self.previous_candidate = Some(candidate.to_string());
-
-        let stable = stable?;
-        if stable.chars().count() < self.min_chars || stable == self.last_emitted {
-            return None;
-        }
-        self.last_emitted.clone_from(&stable);
-        Some(stable)
-    }
-}
-
-fn common_word_prefix(previous: &str, candidate: &str) -> Option<String> {
-    let previous_words = word_spans(previous);
-    let candidate_words = word_spans(candidate);
-    let mut stable_end = 0usize;
-
-    for ((previous_start, previous_end), (candidate_start, candidate_end)) in
-        previous_words.into_iter().zip(candidate_words)
-    {
-        let previous_word = &previous[previous_start..previous_end];
-        let candidate_word = &candidate[candidate_start..candidate_end];
-        if !previous_word.eq_ignore_ascii_case(candidate_word) {
-            break;
-        }
-        stable_end = candidate_end;
-    }
-
-    if stable_end == 0 {
-        None
-    } else {
-        Some(candidate[..stable_end].trim_end().to_string())
-    }
-}
-
-fn word_spans(text: &str) -> Vec<(usize, usize)> {
-    let mut spans = Vec::new();
-    let mut start = None;
-
-    for (index, ch) in text.char_indices() {
-        if ch.is_whitespace() {
-            if let Some(word_start) = start.take() {
-                spans.push((word_start, index));
-            }
-        } else if start.is_none() {
-            start = Some(index);
-        }
-    }
-
-    if let Some(word_start) = start {
-        spans.push((word_start, text.len()));
-    }
-
-    spans
-}
-
 fn pcm_bytes_for_duration(sample_rate: u32, duration: Duration) -> usize {
     let samples = duration.as_secs_f64() * f64::from(sample_rate);
     samples.ceil() as usize * 2
@@ -1151,7 +751,6 @@ mod tests {
 
         let trim = trim_pcm_to_speech(sample_rate, &pcm);
 
-        assert!(trim.detected_speech);
         assert_eq!(trim.leading_trim, Duration::from_millis(500));
         assert_eq!(trim.trailing_trim, Duration::from_millis(700));
         assert_eq!(
@@ -1167,7 +766,6 @@ mod tests {
 
         let trim = trim_pcm_to_speech(sample_rate, &pcm);
 
-        assert!(!trim.detected_speech);
         assert_eq!(trim.pcm, pcm);
         assert_eq!(trim.trailing_silence, Duration::from_millis(400));
     }
@@ -1199,72 +797,6 @@ mod tests {
     }
 
     #[test]
-    fn partial_transcription_request_skips_silence() {
-        let sample_rate = 1_000;
-        let pcm = pcm_for_duration(sample_rate, Duration::from_millis(400), 0);
-
-        assert!(build_partial_transcription_request(sample_rate, &pcm, 0, 1).is_none());
-    }
-
-    #[test]
-    fn partial_transcription_request_preserves_full_active_audio() {
-        let sample_rate = 1_000;
-        let pcm = pcm_for_duration(sample_rate, Duration::from_secs(10), 2_000);
-
-        let request = build_partial_transcription_request(sample_rate, &pcm, 0, 7).unwrap();
-
-        assert_eq!(request.request_id, 7);
-        assert_eq!(request.audio_duration, Duration::from_secs(10));
-        assert_eq!(request.leading_trim, Duration::ZERO);
-    }
-
-    #[test]
-    fn partials_wait_for_minimum_audio_duration() {
-        let mut stabilizer = PartialTranscriptStabilizer::new(Duration::from_millis(2_500));
-
-        assert_eq!(
-            stabilizer.observe(Duration::from_millis(2_499), "hello world"),
-            None
-        );
-        assert_eq!(
-            stabilizer.observe(Duration::from_millis(2_500), "hello world"),
-            None
-        );
-        assert_eq!(
-            stabilizer.observe(Duration::from_millis(3_750), "hello world again"),
-            Some("hello world".to_string())
-        );
-    }
-
-    #[test]
-    fn partials_can_emit_without_minimum_audio_duration() {
-        let mut stabilizer = PartialTranscriptStabilizer::new(Duration::ZERO);
-
-        assert_eq!(
-            stabilizer.observe(Duration::from_millis(100), "hello world"),
-            Some("hello world".to_string())
-        );
-        assert_eq!(
-            stabilizer.observe(Duration::from_millis(200), "hello world again"),
-            Some("hello world again".to_string())
-        );
-    }
-
-    #[test]
-    fn partials_do_not_repeat_unchanged_zero_duration_candidates() {
-        let mut stabilizer = PartialTranscriptStabilizer::new(Duration::ZERO);
-
-        assert_eq!(
-            stabilizer.observe(Duration::from_millis(100), "hello world"),
-            Some("hello world".to_string())
-        );
-        assert_eq!(
-            stabilizer.observe(Duration::from_millis(200), "hello world"),
-            None
-        );
-    }
-
-    #[test]
     fn leading_silence_prepends_zeroed_pcm_samples() {
         assert_eq!(
             pcm_with_leading_silence(4, Duration::from_millis(250), &[1, 2, 3, 4]),
@@ -1283,41 +815,5 @@ mod tests {
             pcm.extend_from_slice(&amplitude.to_le_bytes());
         }
         pcm
-    }
-
-    #[test]
-    fn partials_emit_only_word_prefixes_seen_twice() {
-        let mut stabilizer = PartialTranscriptStabilizer::new(Duration::from_millis(1));
-
-        assert_eq!(
-            stabilizer.observe(Duration::from_secs(3), "yellow word"),
-            None
-        );
-        assert_eq!(
-            stabilizer.observe(Duration::from_secs(4), "hello world"),
-            None
-        );
-        assert_eq!(
-            stabilizer.observe(Duration::from_secs(5), "hello world today"),
-            Some("hello world".to_string())
-        );
-    }
-
-    #[test]
-    fn partials_do_not_repeat_the_same_stable_prefix() {
-        let mut stabilizer = PartialTranscriptStabilizer::new(Duration::from_millis(1));
-
-        assert_eq!(
-            stabilizer.observe(Duration::from_secs(3), "hello world"),
-            None
-        );
-        assert_eq!(
-            stabilizer.observe(Duration::from_secs(4), "hello world today"),
-            Some("hello world".to_string())
-        );
-        assert_eq!(
-            stabilizer.observe(Duration::from_secs(5), "hello world tomorrow"),
-            None
-        );
     }
 }

@@ -58,8 +58,6 @@ pub struct DictationFileConfig {
     pub listening_marker: Option<String>,
     pub inline_partials: Option<bool>,
     pub append_space: Option<bool>,
-    pub partial_interval_ms: Option<u64>,
-    pub partial_min_duration_ms: Option<u64>,
     pub leading_silence_ms: Option<u64>,
     pub preroll_ms: Option<u64>,
 }
