@@ -19,7 +19,7 @@ use crate::audio::{
     StreamingPcmSession, CHANNELS, CHUNK_BYTES, SAMPLE_RATE,
 };
 use crate::config::{health_url, realtime_ws_url, DictateLiveConfig};
-use crate::event::{classify_event, RealtimeEvent};
+use crate::event::{classify_event, RealtimeEvent, RealtimeHypothesis};
 use crate::phase::{PhaseGate, PhaseResult};
 #[cfg(feature = "debug-recordings")]
 use crate::streaming::preserve_recording_snapshot;
@@ -71,13 +71,15 @@ impl RealtimeTranscriptAccumulator {
         self.current()
     }
 
-    fn observe_hypothesis(&mut self, transcript: &str) -> String {
-        self.current_text = transcript.trim().to_string();
-        self.current()
-            .or_else(|| {
-                combine_transcript_segments(self.completed_segments.iter().map(String::as_str))
-            })
-            .unwrap_or_default()
+    fn observe_hypothesis(&mut self, hypothesis: &RealtimeHypothesis) -> Option<String> {
+        let transcript = hypothesis.transcript.trim();
+        if transcript.is_empty() {
+            return None;
+        }
+        self.current_text = transcript.to_string();
+        self.current().or_else(|| {
+            combine_transcript_segments(self.completed_segments.iter().map(String::as_str))
+        })
     }
 
     fn observe_completion(&mut self, final_transcript: &str) -> Option<String> {
@@ -316,13 +318,10 @@ impl LiveTranscriber for RealtimeTranscriber {
                         }
                     }
                     RealtimeEvent::LiveHypothesis(hypothesis) => {
-                        if !send_live_update(
-                            &updates_tx,
-                            transcript.observe_hypothesis(&hypothesis),
-                        )
-                        .await
-                        {
-                            break;
+                        if let Some(transcript) = transcript.observe_hypothesis(&hypothesis) {
+                            if !send_live_update(&updates_tx, transcript).await {
+                                break;
+                            }
                         }
                     }
                     RealtimeEvent::Completed(final_transcript) => {
@@ -659,9 +658,15 @@ mod tests {
     fn realtime_transcript_accumulator_replaces_live_hypothesis() {
         let mut transcript = RealtimeTranscriptAccumulator::default();
 
-        assert_eq!(transcript.observe_hypothesis("hello"), "hello");
-        assert_eq!(transcript.observe_hypothesis("the front"), "the front");
-        assert_eq!(transcript.observe_hypothesis(""), "");
+        assert_eq!(
+            transcript.observe_hypothesis(&hypothesis("hello")),
+            Some("hello".to_string())
+        );
+        assert_eq!(
+            transcript.observe_hypothesis(&hypothesis("the front")),
+            Some("the front".to_string())
+        );
+        assert_eq!(transcript.observe_hypothesis(&hypothesis("")), None);
     }
 
     #[test]
@@ -669,16 +674,16 @@ mod tests {
         let mut transcript = RealtimeTranscriptAccumulator::default();
 
         assert_eq!(
-            transcript.observe_hypothesis("the front fell"),
-            "the front fell"
+            transcript.observe_hypothesis(&hypothesis("the front fell")),
+            Some("the front fell".to_string())
         );
         assert_eq!(
             transcript.observe_delta("the front"),
             Some("the front".to_string())
         );
         assert_eq!(
-            transcript.observe_hypothesis("the front fell off"),
-            "the front fell off"
+            transcript.observe_hypothesis(&hypothesis("the front fell off")),
+            Some("the front fell off".to_string())
         );
     }
 
@@ -726,6 +731,14 @@ mod tests {
             transcript.observe_delta(", world"),
             Some("hello, world".to_string())
         );
+    }
+
+    fn hypothesis(transcript: &str) -> RealtimeHypothesis {
+        RealtimeHypothesis {
+            transcript: transcript.to_string(),
+            confirmed_prefix: String::new(),
+            provisional: transcript.to_string(),
+        }
     }
 
     #[test]

@@ -93,7 +93,7 @@ async fn streaming_injects_live_partial_before_hotkey_up() {
 }
 
 #[tokio::test]
-async fn streaming_empty_live_update_erases_provisional_text() {
+async fn streaming_empty_live_update_keeps_existing_provisional_text() {
     let transcriber = ManualLiveTranscriber::new("");
     let updates = transcriber.updates.clone();
     let injector = FakeInjector::default();
@@ -112,13 +112,46 @@ async fn streaming_empty_live_update_erases_provisional_text() {
     updates.send("hello").await;
     wait_for_operations_len(&operations, 1).await;
     updates.send("").await;
-    wait_for_operations_len(&operations, 2).await;
+    tokio::task::yield_now().await;
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![InjectOperation::Type("hello".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn streaming_empty_live_update_does_not_erase_marker_or_text() {
+    let transcriber = ManualLiveTranscriber::new("hello window");
+    let updates = transcriber.updates.clone();
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        FakeErrorNotifier::default(),
+    )
+    .with_listening_marker(Some("💬".to_string()));
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    updates.send("the front").await;
+    wait_for_operations_len(&operations, 3).await;
+    updates.send("").await;
+    tokio::task::yield_now().await;
+    updates.send("the front fell").await;
+    wait_for_operations_len(&operations, 4).await;
 
     assert_eq!(
         *operations.lock().unwrap(),
         vec![
-            InjectOperation::Type("hello".to_string()),
-            InjectOperation::Backspace(5),
+            InjectOperation::Type("💬".to_string()),
+            InjectOperation::Backspace(1),
+            InjectOperation::Type("the front".to_string()),
+            InjectOperation::Type(" fell".to_string()),
         ]
     );
 }
@@ -161,7 +194,8 @@ async fn streaming_marker_is_replaced_by_live_partial_before_hotkey_up() {
 
 #[tokio::test]
 async fn streaming_marker_is_replaced_by_partial_and_final_text() {
-    let transcriber = FakeLiveTranscriber::new(["hello"], Ok("  hello window\n".to_string()));
+    let transcriber = ManualLiveTranscriber::new("  hello window\n");
+    let updates = transcriber.updates.clone();
     let injector = FakeInjector::default();
     let operations = injector.operations.clone();
     let mut controller = StreamingDictationController::new_with_notifiers(
@@ -176,6 +210,8 @@ async fn streaming_marker_is_replaced_by_partial_and_final_text() {
         .handle_hotkey(IpcCommand::HotkeyDown)
         .await
         .unwrap();
+    updates.send("hello").await;
+    wait_for_operations_len(&operations, 3).await;
     controller
         .handle_hotkey(IpcCommand::HotkeyUp)
         .await
@@ -187,7 +223,67 @@ async fn streaming_marker_is_replaced_by_partial_and_final_text() {
             InjectOperation::Type("💬".to_string()),
             InjectOperation::Backspace(1),
             InjectOperation::Type("hello".to_string()),
-            InjectOperation::Type(" window ".to_string()),
+            InjectOperation::Type(" 💬".to_string()),
+            InjectOperation::Backspace(1),
+            InjectOperation::Type("window ".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn streaming_shows_wait_marker_while_final_transcript_is_pending() {
+    let (release_stop, wait_for_release) = tokio::sync::oneshot::channel();
+    let transcriber = BlockingStopTranscriber::new("hello window", wait_for_release);
+    let updates = transcriber.updates.clone();
+    let stop_started = transcriber.stop_started.clone();
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        FakeErrorNotifier::default(),
+    )
+    .with_listening_marker(Some("💬".to_string()));
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    updates.send("hello").await;
+    wait_for_operations_len(&operations, 3).await;
+
+    let stop_task = tokio::spawn(async move {
+        controller
+            .handle_hotkey(IpcCommand::HotkeyUp)
+            .await
+            .unwrap();
+    });
+    stop_started.notified().await;
+    wait_for_operations_len(&operations, 4).await;
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            InjectOperation::Type("💬".to_string()),
+            InjectOperation::Backspace(1),
+            InjectOperation::Type("hello".to_string()),
+            InjectOperation::Type(" 💬".to_string()),
+        ]
+    );
+
+    release_stop.send(()).unwrap();
+    stop_task.await.unwrap();
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            InjectOperation::Type("💬".to_string()),
+            InjectOperation::Backspace(1),
+            InjectOperation::Type("hello".to_string()),
+            InjectOperation::Type(" 💬".to_string()),
+            InjectOperation::Backspace(1),
+            InjectOperation::Type("window ".to_string()),
         ]
     );
 }
@@ -557,6 +653,51 @@ impl LiveTranscriber for ManualLiveTranscriber {
     async fn stop(&self, _session: Self::Session) -> anyhow::Result<String> {
         self.updates.sender.lock().unwrap().take();
         self.final_result.clone().map_err(anyhow::Error::msg)
+    }
+}
+
+#[derive(Clone)]
+struct BlockingStopTranscriber {
+    updates: ManualLiveUpdates,
+    final_transcript: String,
+    stop_started: Arc<tokio::sync::Notify>,
+    wait_for_release: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
+}
+
+impl BlockingStopTranscriber {
+    fn new(
+        final_transcript: impl Into<String>,
+        wait_for_release: tokio::sync::oneshot::Receiver<()>,
+    ) -> Self {
+        Self {
+            updates: ManualLiveUpdates::default(),
+            final_transcript: final_transcript.into(),
+            stop_started: Arc::new(tokio::sync::Notify::new()),
+            wait_for_release: Arc::new(tokio::sync::Mutex::new(Some(wait_for_release))),
+        }
+    }
+}
+
+#[async_trait]
+impl LiveTranscriber for BlockingStopTranscriber {
+    type Session = FakeSession;
+
+    async fn start(&self) -> anyhow::Result<LiveTranscriptionSession<Self::Session>> {
+        let (updates_tx, updates_rx) = mpsc::channel(1);
+        *self.updates.sender.lock().unwrap() = Some(updates_tx);
+        Ok(LiveTranscriptionSession {
+            session: FakeSession,
+            updates: updates_rx,
+        })
+    }
+
+    async fn stop(&self, _session: Self::Session) -> anyhow::Result<String> {
+        self.stop_started.notify_one();
+        if let Some(wait_for_release) = self.wait_for_release.lock().await.take() {
+            let _ = wait_for_release.await;
+        }
+        self.updates.sender.lock().unwrap().take();
+        Ok(self.final_transcript.clone())
     }
 }
 

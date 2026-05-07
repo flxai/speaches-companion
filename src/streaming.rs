@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use async_trait::async_trait;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 
 #[cfg(feature = "debug-recordings")]
@@ -76,6 +76,7 @@ where
     I: TextInjector,
 {
     session: S,
+    partial_command_tx: mpsc::Sender<PartialTextCommand>,
     partial_task: JoinHandle<PartialTextSession<I>>,
 }
 
@@ -85,6 +86,13 @@ where
 {
     text_session: SpeculativeTextSession<I>,
     latest_partial: Option<String>,
+}
+
+enum PartialTextCommand {
+    ShowWaitingMarker {
+        marker: Option<String>,
+        ack: oneshot::Sender<anyhow::Result<()>>,
+    },
 }
 
 impl<L, I> StreamingDictationController<L, I>
@@ -204,8 +212,10 @@ where
         }
         self.notify_transcript(|notifier| notifier.notify_listening());
 
+        let (partial_command_tx, partial_command_rx) = mpsc::channel(4);
         let partial_task = tokio::spawn(consume_live_updates(
             live_session.updates,
+            partial_command_rx,
             self.transcript_notifier.clone(),
             self.error_notifier.clone(),
             text_session,
@@ -213,6 +223,7 @@ where
         ));
         self.active = Some(ActiveStreamingSession {
             session: live_session.session,
+            partial_command_tx,
             partial_task,
         });
 
@@ -223,11 +234,23 @@ where
         let Some(active) = self.active.take() else {
             return Ok(DaemonResponse::AlreadyIdle);
         };
+        let ActiveStreamingSession {
+            session,
+            partial_command_tx,
+            partial_task,
+        } = active;
 
-        let final_transcript = match self.transcriber.stop(active.session).await {
+        if let Err(error) =
+            show_waiting_marker(&partial_command_tx, self.listening_marker.clone()).await
+        {
+            self.notify_failure("Final wait marker replacement failed", &error);
+        }
+
+        let final_transcript = match self.transcriber.stop(session).await {
             Ok(transcript) => transcript,
             Err(error) => {
-                let mut partial_state = match finish_partial_task(active.partial_task).await {
+                drop(partial_command_tx);
+                let mut partial_state = match finish_partial_task(partial_task).await {
                     Ok(partial_state) => partial_state,
                     Err(partial_error) => {
                         self.notify_failure("Partial text replacement failed", &partial_error);
@@ -253,7 +276,8 @@ where
                 return Err(error);
             }
         };
-        let mut partial_state = match finish_partial_task(active.partial_task).await {
+        drop(partial_command_tx);
+        let mut partial_state = match finish_partial_task(partial_task).await {
             Ok(partial_state) => partial_state,
             Err(error) => {
                 self.notify_failure("Partial text replacement failed", &error);
@@ -303,6 +327,7 @@ where
 
 async fn consume_live_updates<I, V, N>(
     mut updates: mpsc::Receiver<LiveTranscriptUpdate>,
+    mut commands: mpsc::Receiver<PartialTextCommand>,
     transcript_notifier: V,
     error_notifier: N,
     mut text_session: SpeculativeTextSession<I>,
@@ -314,41 +339,104 @@ where
     N: ErrorNotifier,
 {
     let mut latest_partial = None;
-    while let Some(update) = updates.recv().await {
-        let transcript = normalize_transcript_for_injection(&update.transcript);
-        let Some(transcript) = transcript else {
-            if latest_partial.is_some() || !text_session.inserted_text().is_empty() {
-                latest_partial = None;
-                if let Err(error) = text_session.replace_text("") {
-                    notify_failure(&error_notifier, "Partial text cleanup failed", &error);
-                    break;
+    let mut waiting_marker = None;
+    let mut updates_open = true;
+    let mut commands_open = true;
+    while updates_open || commands_open {
+        tokio::select! {
+            update = updates.recv(), if updates_open => {
+                let Some(update) = update else {
+                    updates_open = false;
+                    continue;
+                };
+                let transcript = normalize_transcript_for_injection(&update.transcript);
+                let Some(transcript) = transcript else {
+                    continue;
+                };
+                if latest_partial.as_deref() == Some(transcript.as_str()) && waiting_marker.is_none() {
+                    continue;
+                }
+                latest_partial = Some(transcript.clone());
+                let mut displayed_inline = false;
+                if inline_partials || waiting_marker.is_some() {
+                    let display_text = displayed_partial_text(latest_partial.as_deref(), waiting_marker.as_deref());
+                    match text_session.replace_text(&display_text) {
+                        Ok(changed) => displayed_inline = changed,
+                        Err(error) => {
+                            notify_failure(&error_notifier, "Partial text replacement failed", &error);
+                            break;
+                        }
+                    }
+                }
+                if displayed_inline || !inline_partials {
+                    notify_transcript(&transcript_notifier, |notifier| {
+                        notifier.notify_partial(&transcript)
+                    });
                 }
             }
-            continue;
-        };
-        if latest_partial.as_deref() == Some(transcript.as_str()) {
-            continue;
-        }
-        latest_partial = Some(transcript.clone());
-        let mut displayed_inline = false;
-        if inline_partials {
-            match text_session.replace_text(&transcript) {
-                Ok(changed) => displayed_inline = changed,
-                Err(error) => {
-                    notify_failure(&error_notifier, "Partial text replacement failed", &error);
-                    break;
+            command = commands.recv(), if commands_open => {
+                let Some(command) = command else {
+                    commands_open = false;
+                    continue;
+                };
+                match command {
+                    PartialTextCommand::ShowWaitingMarker { marker, ack } => {
+                        waiting_marker = marker.and_then(|marker| normalize_transcript_for_injection(&marker));
+                        let result = match waiting_marker.as_deref() {
+                            Some(_) => {
+                                let display_text = displayed_partial_text(latest_partial.as_deref(), waiting_marker.as_deref());
+                                text_session.replace_text(&display_text).map(|_| ())
+                            }
+                            None => Ok(()),
+                        };
+                        let _ = ack.send(result);
+                    }
                 }
             }
-        }
-        if displayed_inline || !inline_partials {
-            notify_transcript(&transcript_notifier, |notifier| {
-                notifier.notify_partial(&transcript)
-            });
         }
     }
     PartialTextSession {
         text_session,
         latest_partial,
+    }
+}
+
+async fn show_waiting_marker(
+    command_tx: &mpsc::Sender<PartialTextCommand>,
+    marker: Option<String>,
+) -> anyhow::Result<()> {
+    let Some(marker) = marker.and_then(|marker| normalize_transcript_for_injection(&marker)) else {
+        return Ok(());
+    };
+    let (ack_tx, ack_rx) = oneshot::channel();
+    command_tx
+        .send(PartialTextCommand::ShowWaitingMarker {
+            marker: Some(marker),
+            ack: ack_tx,
+        })
+        .await
+        .context("partial text task stopped before final wait marker could be shown")?;
+    ack_rx
+        .await
+        .context("partial text task stopped before acknowledging final wait marker")?
+}
+
+fn displayed_partial_text(partial: Option<&str>, waiting_marker: Option<&str>) -> String {
+    match (partial, waiting_marker) {
+        (Some(partial), Some(marker)) => append_marker(partial, marker),
+        (Some(partial), None) => partial.to_string(),
+        (None, Some(marker)) => marker.to_string(),
+        (None, None) => String::new(),
+    }
+}
+
+fn append_marker(text: &str, marker: &str) -> String {
+    if text.is_empty() {
+        marker.to_string()
+    } else if text.ends_with(char::is_whitespace) || marker.starts_with(char::is_whitespace) {
+        format!("{text}{marker}")
+    } else {
+        format!("{text} {marker}")
     }
 }
 

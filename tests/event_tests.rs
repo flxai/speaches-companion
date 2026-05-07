@@ -1,5 +1,5 @@
 use serde_json::json;
-use speaches_scribe::event::{classify_event, RealtimeEvent};
+use speaches_scribe::event::{classify_event, RealtimeEvent, RealtimeHypothesis};
 use speaches_scribe::phase::{PhaseGate, PhaseResult};
 
 #[test]
@@ -39,7 +39,11 @@ fn classifies_input_transcription_hypothesis() {
 
     assert_eq!(
         classify_event(&event),
-        RealtimeEvent::LiveHypothesis("the front fell".to_string())
+        RealtimeEvent::LiveHypothesis(RealtimeHypothesis {
+            transcript: "the front fell".to_string(),
+            confirmed_prefix: "the front".to_string(),
+            provisional: "fell".to_string(),
+        })
     );
 }
 
@@ -70,7 +74,11 @@ fn phase_passes_only_when_delta_precedes_completion() {
 fn phase_passes_when_hypothesis_precedes_completion() {
     let mut gate = PhaseGate::default();
 
-    gate.observe(&RealtimeEvent::LiveHypothesis("hello".to_string()));
+    gate.observe(&RealtimeEvent::LiveHypothesis(RealtimeHypothesis {
+        transcript: "hello".to_string(),
+        confirmed_prefix: String::new(),
+        provisional: "hello".to_string(),
+    }));
     gate.observe(&RealtimeEvent::Completed("hello world".to_string()));
 
     assert_eq!(gate.result(), PhaseResult::Passed);

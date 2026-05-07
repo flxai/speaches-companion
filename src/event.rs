@@ -3,11 +3,18 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RealtimeEvent {
     LiveDelta(String),
-    LiveHypothesis(String),
+    LiveHypothesis(RealtimeHypothesis),
     Completed(String),
     Failed(String),
     Error(String),
     Other(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealtimeHypothesis {
+    pub transcript: String,
+    pub confirmed_prefix: String,
+    pub provisional: String,
 }
 
 pub fn classify_event(event: &Value) -> RealtimeEvent {
@@ -28,7 +35,11 @@ pub fn classify_event(event: &Value) -> RealtimeEvent {
             && event_type.ends_with(".hypothesis")
             && string_field(event, "transcript").is_some() =>
         {
-            RealtimeEvent::LiveHypothesis(string_field(event, "transcript").unwrap_or_default())
+            RealtimeEvent::LiveHypothesis(RealtimeHypothesis {
+                transcript: string_field(event, "transcript").unwrap_or_default(),
+                confirmed_prefix: string_field(event, "confirmed_prefix").unwrap_or_default(),
+                provisional: string_field(event, "provisional").unwrap_or_default(),
+            })
         }
         _ if event_type.contains("input_audio_transcription")
             && event_type.ends_with(".delta")
