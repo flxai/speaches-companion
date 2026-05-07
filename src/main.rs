@@ -78,6 +78,10 @@ struct DaemonArgs {
     realtime_partials: bool,
     #[arg(long)]
     no_realtime_partials: bool,
+    #[arg(long, conflicts_with = "no_final_pass")]
+    final_pass: bool,
+    #[arg(long)]
+    no_final_pass: bool,
     #[arg(long)]
     listening_marker: Option<String>,
     #[arg(long)]
@@ -256,7 +260,8 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     ));
     if daemon_settings.realtime_partials {
         let transcriber = RealtimeTranscriber::new(config.base_url, config.model, config.language)
-            .with_preroll(Duration::from_millis(daemon_settings.preroll_ms));
+            .with_preroll(Duration::from_millis(daemon_settings.preroll_ms))
+            .with_final_pass(daemon_settings.final_pass);
         #[cfg(feature = "debug-recordings")]
         let transcriber = transcriber.with_record_dir(daemon_settings.record_dir.clone());
         match prepare_realtime_daemon_transcriber(transcriber).await {
@@ -354,6 +359,7 @@ where
     )
     .with_listening_marker(daemon_settings.listening_marker)
     .with_inline_partials(daemon_settings.inline_partials)
+    .with_final_transcript(daemon_settings.final_pass || !daemon_settings.realtime_partials)
     .with_append_space(daemon_settings.append_space);
 
     eprintln!(
@@ -376,6 +382,7 @@ struct DaemonSettings {
     record_dir: Option<PathBuf>,
     stream_response: bool,
     realtime_partials: bool,
+    final_pass: bool,
     listening_marker: Option<String>,
     inline_partials: bool,
     append_space: bool,
@@ -396,6 +403,7 @@ fn resolve_daemon_settings(args: &DaemonArgs, file_config: &FileConfig) -> Daemo
             .or_else(|| file_config.dictation.record_dir.clone()),
         stream_response: resolve_stream_response(args, file_config),
         realtime_partials: resolve_realtime_partials(args, file_config),
+        final_pass: resolve_final_pass(args, file_config),
         listening_marker: resolve_listening_marker(args, file_config),
         inline_partials: resolve_inline_partials(args, file_config),
         append_space: resolve_append_space(args, file_config),
@@ -417,6 +425,16 @@ fn resolve_realtime_partials(args: &DaemonArgs, file_config: &FileConfig) -> boo
         false
     } else {
         file_config.dictation.realtime_partials.unwrap_or(false)
+    }
+}
+
+fn resolve_final_pass(args: &DaemonArgs, file_config: &FileConfig) -> bool {
+    if args.final_pass {
+        true
+    } else if args.no_final_pass {
+        false
+    } else {
+        file_config.dictation.final_pass.unwrap_or(true)
     }
 }
 
@@ -864,6 +882,7 @@ mod tests {
             Some(DEFAULT_LISTENING_MARKER.to_string())
         );
         assert!(settings.inline_partials);
+        assert!(settings.final_pass);
         assert!(settings.append_space);
         assert_eq!(settings.preroll_ms, DEFAULT_PREROLL_MS);
     }
@@ -893,6 +912,7 @@ mod tests {
                 record_dir: Some(PathBuf::from("recordings")),
                 stream_response: Some(true),
                 realtime_partials: Some(true),
+                final_pass: Some(false),
                 listening_marker: Some("...".to_string()),
                 inline_partials: Some(false),
                 append_space: Some(false),
@@ -909,6 +929,7 @@ mod tests {
         assert_eq!(settings.record_dir, Some(PathBuf::from("recordings")));
         assert!(settings.stream_response);
         assert!(settings.realtime_partials);
+        assert!(!settings.final_pass);
         assert_eq!(settings.listening_marker, Some("...".to_string()));
         assert!(!settings.inline_partials);
         assert!(!settings.append_space);
@@ -946,6 +967,22 @@ mod tests {
         let settings = resolve_daemon_settings(&args, &file_config);
 
         assert!(!settings.realtime_partials);
+    }
+
+    #[test]
+    fn daemon_can_disable_final_pass_from_file_config() {
+        let args = parse_daemon_args(["speaches-scribe", "daemon", "--no-final-pass"]);
+        let file_config = FileConfig {
+            dictation: DictationFileConfig {
+                final_pass: Some(true),
+                ..DictationFileConfig::default()
+            },
+            ..FileConfig::default()
+        };
+
+        let settings = resolve_daemon_settings(&args, &file_config);
+
+        assert!(!settings.final_pass);
     }
 
     #[tokio::test]

@@ -65,7 +65,8 @@ player_args = ["--raw", "--rate", "24000", "--channels", "1", "--format", "s16"]
 transcript_dir = "target/speaches-scribe-transcripts"
 record_dir = "target/speaches-scribe-recordings"
 stream_response = false
-realtime_partials = false
+realtime_partials = true
+final_pass = false
 listening_marker = "💬"
 inline_partials = true
 append_space = true
@@ -90,9 +91,11 @@ response format needs player-specific options, for example raw PCM playback.
 
 By default, the daemon records while the hotkey is held and sends one final
 transcription request to Speaches on release. Set `realtime_partials = true` to
-use Speaches' realtime WebSocket path for live partials while recording. If
-focus changes during a recording, `speaches-scribe` stops editing the target
-window instead of sending Backspaces to the wrong place.
+use Speaches' realtime WebSocket path for live partials while recording. For
+realtime dictation, set `final_pass = false` or pass `--no-final-pass` to stop
+on the latest live hypothesis instead of committing a final transcription job on
+release. If focus changes during a recording, `speaches-scribe` stops editing
+the target window instead of sending Backspaces to the wrong place.
 
 On startup the daemon starts continuous `pw-record` capture before it accepts
 hotkey-driven dictation. If that capture cannot start, daemon startup fails

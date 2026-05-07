@@ -28,6 +28,7 @@ use crate::trace::TraceWriter;
 
 const REALTIME_WARMUP_DURATION: Duration = Duration::from_millis(500);
 const REALTIME_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
+const REALTIME_NO_FINAL_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const REALTIME_AUDIO_POLL: Duration = Duration::from_millis(40);
 
 pub struct RunOutcome {
@@ -46,6 +47,7 @@ pub struct RealtimeTranscriber {
     record_dir: Option<PathBuf>,
     preroll: Duration,
     sample_rate: u32,
+    final_pass: bool,
 }
 
 pub struct RealtimeSession {
@@ -194,11 +196,17 @@ impl RealtimeTranscriber {
             record_dir: None,
             preroll: Duration::from_millis(750),
             sample_rate: SAMPLE_RATE,
+            final_pass: true,
         }
     }
 
     pub fn with_preroll(mut self, preroll: Duration) -> Self {
         self.preroll = preroll;
+        self
+    }
+
+    pub fn with_final_pass(mut self, final_pass: bool) -> Self {
+        self.final_pass = final_pass;
         self
     }
 
@@ -288,6 +296,7 @@ impl LiveTranscriber for RealtimeTranscriber {
         #[cfg(feature = "debug-recordings")]
         let record_dir = self.record_dir.clone();
         let sample_rate = self.sample_rate;
+        let final_pass = self.final_pass;
 
         let sender_task = tokio::spawn(async move {
             stream_realtime_session_audio(
@@ -295,6 +304,7 @@ impl LiveTranscriber for RealtimeTranscriber {
                 sample_rate,
                 stop_rx,
                 &mut sink,
+                final_pass,
                 #[cfg(feature = "debug-recordings")]
                 record_dir,
             )
@@ -371,6 +381,21 @@ impl LiveTranscriber for RealtimeTranscriber {
         if total_audio_bytes == 0 {
             bail!("recording stopped before any audio was captured");
         }
+        if !self.final_pass {
+            let mut receiver_task = session.receiver_task;
+            tokio::select! {
+                result = &mut receiver_task => {
+                    match result {
+                        Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {}
+                    }
+                }
+                _ = sleep(REALTIME_NO_FINAL_DRAIN_TIMEOUT) => {
+                    receiver_task.abort();
+                    let _ = receiver_task.await;
+                }
+            }
+            return Ok(String::new());
+        }
         timeout(REALTIME_COMPLETION_TIMEOUT, session.receiver_task)
             .await
             .context("timed out waiting for realtime transcription completion")?
@@ -408,6 +433,7 @@ async fn stream_realtime_session_audio<S>(
     sample_rate: u32,
     mut stop_rx: watch::Receiver<bool>,
     sink: &mut S,
+    final_pass: bool,
     #[cfg(feature = "debug-recordings")] record_dir: Option<PathBuf>,
 ) -> Result<usize>
 where
@@ -432,7 +458,13 @@ where
         }
         total_sent +=
             send_available_realtime_audio(&pcm_session, sample_rate, &mut cursor, sink).await?;
-        send_realtime_commit(sink).await?;
+        if final_pass {
+            send_realtime_commit(sink).await?;
+        } else {
+            sink.close()
+                .await
+                .context("failed to close realtime websocket")?;
+        }
         Result::<usize>::Ok(total_sent)
     }
     .await;

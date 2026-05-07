@@ -67,6 +67,7 @@ where
     error_notifier: N,
     listening_marker: Option<String>,
     inline_partials: bool,
+    final_transcript: bool,
     append_space: bool,
     active: Option<ActiveStreamingSession<L::Session, I>>,
 }
@@ -108,6 +109,7 @@ where
             error_notifier: NoopErrorNotifier,
             listening_marker: None,
             inline_partials: true,
+            final_transcript: true,
             append_space: true,
             active: None,
         }
@@ -134,6 +136,7 @@ where
             error_notifier,
             listening_marker: None,
             inline_partials: true,
+            final_transcript: true,
             append_space: true,
             active: None,
         }
@@ -147,6 +150,11 @@ where
 
     pub fn with_inline_partials(mut self, inline_partials: bool) -> Self {
         self.inline_partials = inline_partials;
+        self
+    }
+
+    pub fn with_final_transcript(mut self, final_transcript: bool) -> Self {
+        self.final_transcript = final_transcript;
         self
     }
 
@@ -240,13 +248,15 @@ where
             partial_task,
         } = active;
 
-        if let Err(error) =
-            show_waiting_marker(&partial_command_tx, self.listening_marker.clone()).await
-        {
-            self.notify_failure("Final wait marker replacement failed", &error);
+        if self.final_transcript {
+            if let Err(error) =
+                show_waiting_marker(&partial_command_tx, self.listening_marker.clone()).await
+            {
+                self.notify_failure("Final wait marker replacement failed", &error);
+            }
         }
 
-        let final_transcript = match self.transcriber.stop(session).await {
+        let stop_transcript = match self.transcriber.stop(session).await {
             Ok(transcript) => transcript,
             Err(error) => {
                 drop(partial_command_tx);
@@ -285,7 +295,13 @@ where
             }
         };
 
-        match normalize_transcript_for_injection(&final_transcript) {
+        let final_transcript = if self.final_transcript {
+            normalize_transcript_for_injection(&stop_transcript)
+        } else {
+            None
+        };
+
+        match final_transcript {
             Some(transcript) => {
                 let text = format_transcript_for_injection(&transcript, self.append_space)
                     .expect("normalized transcript should format for injection");

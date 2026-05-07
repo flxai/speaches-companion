@@ -173,6 +173,7 @@ player_args = ["--raw", "--rate", "24000"]
 transcript_dir = "transcripts"
 stream_response = true
 realtime_partials = true
+final_pass = false
 listening_marker = "..."
 inline_partials = false
 append_space = false
@@ -202,6 +203,7 @@ preroll_ms = 1000
     );
     assert_eq!(config.dictation.stream_response, Some(true));
     assert_eq!(config.dictation.realtime_partials, Some(true));
+    assert_eq!(config.dictation.final_pass, Some(false));
     assert_eq!(config.dictation.listening_marker.as_deref(), Some("..."));
     assert_eq!(config.dictation.inline_partials, Some(false));
     assert_eq!(config.dictation.append_space, Some(false));

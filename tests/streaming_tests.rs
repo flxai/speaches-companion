@@ -350,6 +350,51 @@ async fn streaming_uses_last_partial_when_final_is_empty() {
 }
 
 #[tokio::test]
+async fn streaming_can_skip_final_pass_and_keep_last_partial() {
+    let transcriber = FakeLiveTranscriber::new(["hello"], Ok("hello window".to_string()));
+    let stops = transcriber.stops.clone();
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let transcript_notifier = FakeTranscriptNotifier::default();
+    let transcript_events = transcript_notifier.events.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        transcript_notifier,
+        FakeErrorNotifier::default(),
+    )
+    .with_listening_marker(Some("💬".to_string()))
+    .with_final_transcript(false);
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    controller
+        .handle_hotkey(IpcCommand::HotkeyUp)
+        .await
+        .unwrap();
+
+    assert_eq!(*stops.lock().unwrap(), 1);
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            InjectOperation::Type("💬".to_string()),
+            InjectOperation::Backspace(1),
+            InjectOperation::Type("hello".to_string()),
+            InjectOperation::Type(" ".to_string()),
+        ]
+    );
+    assert_eq!(
+        *transcript_events.lock().unwrap(),
+        vec![
+            TranscriptNotice::Listening,
+            TranscriptNotice::Partial("hello".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn streaming_can_defer_partial_injection_until_stop() {
     let transcriber = ManualLiveTranscriber::new(" \n");
     let updates = transcriber.updates.clone();

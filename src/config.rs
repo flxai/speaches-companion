@@ -57,6 +57,7 @@ pub struct DictationFileConfig {
     pub record_dir: Option<PathBuf>,
     pub stream_response: Option<bool>,
     pub realtime_partials: Option<bool>,
+    pub final_pass: Option<bool>,
     pub listening_marker: Option<String>,
     pub inline_partials: Option<bool>,
     pub append_space: Option<bool>,
