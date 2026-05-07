@@ -50,7 +50,8 @@ pub struct RealtimeSession {
 
 #[derive(Debug, Default)]
 struct RealtimeTranscriptAccumulator {
-    text: String,
+    completed_segments: Vec<String>,
+    live_text: String,
 }
 
 impl RealtimeTranscriptAccumulator {
@@ -58,17 +59,99 @@ impl RealtimeTranscriptAccumulator {
         if delta.trim().is_empty() {
             return None;
         }
-        self.text.push_str(delta);
-        Some(self.text.clone())
+        self.live_text.push_str(delta);
+        self.current()
+    }
+
+    fn observe_completion(&mut self, final_transcript: &str) -> Option<String> {
+        if let Some(segment) = normalized_transcript_segment(final_transcript) {
+            self.completed_segments.push(segment);
+        }
+        self.live_text.clear();
+        self.current()
     }
 
     fn current(&self) -> Option<String> {
-        if self.text.trim().is_empty() {
-            None
-        } else {
-            Some(self.text.clone())
-        }
+        combine_transcript_segments(
+            self.completed_segments
+                .iter()
+                .map(String::as_str)
+                .chain(std::iter::once(self.live_text.as_str())),
+        )
     }
+}
+
+fn normalized_transcript_segment(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+fn combine_transcript_segments<'a>(segments: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let mut combined = String::new();
+    for segment in segments {
+        let Some(segment) = normalized_transcript_segment(segment) else {
+            continue;
+        };
+        push_transcript_segment(&mut combined, &segment);
+    }
+    if combined.is_empty() {
+        None
+    } else {
+        Some(combined)
+    }
+}
+
+fn push_transcript_segment(combined: &mut String, segment: &str) {
+    if combined.is_empty()
+        || combined.ends_with(char::is_whitespace)
+        || segment.chars().next().is_some_and(is_leading_punctuation)
+    {
+        combined.push_str(segment);
+    } else {
+        combined.push(' ');
+        combined.push_str(segment);
+    }
+}
+
+fn is_leading_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '%' | '\'' | '"'
+    )
+}
+
+fn is_realtime_commit_buffer_size_error(error: &str) -> bool {
+    error.contains("buffer too small") || error.contains("buffer is empty")
+}
+
+fn current_or_empty(transcript: &RealtimeTranscriptAccumulator) -> String {
+    transcript.current().unwrap_or_default()
+}
+
+fn completed_or_live_after_stop(
+    transcript: &RealtimeTranscriptAccumulator,
+    error: &str,
+    stop_requested: bool,
+) -> Option<String> {
+    if stop_requested && is_realtime_commit_buffer_size_error(error) {
+        transcript.current()
+    } else {
+        None
+    }
+}
+
+async fn send_live_update(
+    updates_tx: &mpsc::Sender<LiveTranscriptUpdate>,
+    transcript: String,
+) -> bool {
+    updates_tx
+        .send(LiveTranscriptUpdate { transcript })
+        .await
+        .is_ok()
 }
 
 impl RealtimeTranscriber {
@@ -164,6 +247,7 @@ impl LiveTranscriber for RealtimeTranscriber {
         let (mut sink, mut stream) = ws_stream.split();
         let (updates_tx, updates_rx) = mpsc::channel::<LiveTranscriptUpdate>(32);
         let (stop_tx, stop_rx) = watch::channel(false);
+        let receiver_stop_rx = stop_rx.clone();
         let sample_rate = self.sample_rate;
 
         let sender_task = tokio::spawn(async move {
@@ -181,17 +265,29 @@ impl LiveTranscriber for RealtimeTranscriber {
                 match classify_event(&value) {
                     RealtimeEvent::LiveDelta(delta) => {
                         if let Some(transcript) = transcript.observe_delta(&delta) {
-                            if updates_tx
-                                .send(LiveTranscriptUpdate { transcript })
-                                .await
-                                .is_err()
-                            {
+                            if !send_live_update(&updates_tx, transcript).await {
                                 break;
                             }
                         }
                     }
-                    RealtimeEvent::Completed(final_transcript) => return Ok(final_transcript),
+                    RealtimeEvent::Completed(final_transcript) => {
+                        if let Some(transcript) = transcript.observe_completion(&final_transcript) {
+                            if !send_live_update(&updates_tx, transcript).await {
+                                break;
+                            }
+                        }
+                        if *receiver_stop_rx.borrow() {
+                            return Ok(current_or_empty(&transcript));
+                        }
+                    }
                     RealtimeEvent::Failed(error) | RealtimeEvent::Error(error) => {
+                        if let Some(transcript) = completed_or_live_after_stop(
+                            &transcript,
+                            &error,
+                            *receiver_stop_rx.borrow(),
+                        ) {
+                            return Ok(transcript);
+                        }
                         bail!("realtime transcription failed: {error}")
                     }
                     RealtimeEvent::Other(_) => {}
@@ -468,7 +564,7 @@ mod tests {
     fn realtime_transcript_accumulator_emits_full_running_text() {
         let mut transcript = RealtimeTranscriptAccumulator::default();
 
-        assert_eq!(transcript.observe_delta("the "), Some("the ".to_string()));
+        assert_eq!(transcript.observe_delta("the "), Some("the".to_string()));
         assert_eq!(
             transcript.observe_delta("front"),
             Some("the front".to_string())
@@ -485,6 +581,75 @@ mod tests {
 
         assert_eq!(transcript.observe_delta("   "), None);
         assert_eq!(transcript.current(), None);
+    }
+
+    #[test]
+    fn realtime_transcript_accumulator_treats_completion_as_segment_boundary() {
+        let mut transcript = RealtimeTranscriptAccumulator::default();
+
+        assert_eq!(
+            transcript.observe_delta("the front"),
+            Some("the front".to_string())
+        );
+        assert_eq!(
+            transcript.observe_completion("the front fell off"),
+            Some("the front fell off".to_string())
+        );
+        assert_eq!(
+            transcript.observe_delta("and sank"),
+            Some("the front fell off and sank".to_string())
+        );
+    }
+
+    #[test]
+    fn realtime_transcript_accumulator_joins_completed_segments() {
+        let mut transcript = RealtimeTranscriptAccumulator::default();
+
+        assert_eq!(
+            transcript.observe_completion("Also ich sehe das."),
+            Some("Also ich sehe das.".to_string())
+        );
+        assert_eq!(
+            transcript.observe_completion("Das funktioniert."),
+            Some("Also ich sehe das. Das funktioniert.".to_string())
+        );
+    }
+
+    #[test]
+    fn realtime_transcript_accumulator_keeps_leading_punctuation_attached() {
+        let mut transcript = RealtimeTranscriptAccumulator::default();
+
+        assert_eq!(
+            transcript.observe_completion("hello"),
+            Some("hello".to_string())
+        );
+        assert_eq!(
+            transcript.observe_delta(", world"),
+            Some("hello, world".to_string())
+        );
+    }
+
+    #[test]
+    fn realtime_buffer_size_error_after_stop_can_return_existing_text() {
+        let mut transcript = RealtimeTranscriptAccumulator::default();
+        transcript.observe_completion("the front fell off");
+
+        assert_eq!(
+            completed_or_live_after_stop(
+                &transcript,
+                "Error committing input audio buffer: buffer too small. Expected at least 100ms of audio, but buffer only has 0.00ms of audio.",
+                true,
+            ),
+            Some("the front fell off".to_string())
+        );
+        assert_eq!(
+            completed_or_live_after_stop(
+                &transcript,
+                "Error committing input audio buffer: buffer too small.",
+                false,
+            ),
+            None
+        );
     }
 
     #[test]
