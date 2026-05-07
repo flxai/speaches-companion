@@ -53,6 +53,8 @@ pub struct TtsFileConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct DictationFileConfig {
     pub transcript_dir: Option<PathBuf>,
+    #[cfg(feature = "debug-recordings")]
+    pub record_dir: Option<PathBuf>,
     pub stream_response: Option<bool>,
     pub realtime_partials: Option<bool>,
     pub listening_marker: Option<String>,

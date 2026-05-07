@@ -3,6 +3,9 @@ name = "speaches-scribe"
 version = "0.3.0"
 edition = "2021"
 
+[features]
+debug-recordings = []
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1.89"

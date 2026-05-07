@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
+#[cfg(feature = "debug-recordings")]
+use crate::audio::write_pcm_mp3;
 use crate::audio::{
     start_streaming_pcm_capture, write_pcm_wav, SharedPcmBuffer, StreamingPcmCapture,
     StreamingPcmSession, STT_SAMPLE_RATE,
@@ -387,6 +389,8 @@ pub struct FinalHttpTranscriber {
     options: TranscribeOptions,
     capture: Arc<Mutex<Option<StreamingPcmCapture>>>,
     transcript_dir: Option<PathBuf>,
+    #[cfg(feature = "debug-recordings")]
+    record_dir: Option<PathBuf>,
     leading_silence: Duration,
     preroll: Duration,
     sample_rate: u32,
@@ -399,6 +403,8 @@ impl FinalHttpTranscriber {
             options,
             capture: Arc::new(Mutex::new(None)),
             transcript_dir: None,
+            #[cfg(feature = "debug-recordings")]
+            record_dir: None,
             leading_silence: Duration::from_millis(250),
             preroll: Duration::from_millis(750),
             sample_rate: STT_SAMPLE_RATE,
@@ -417,6 +423,12 @@ impl FinalHttpTranscriber {
 
     pub fn with_transcript_dir(mut self, transcript_dir: Option<PathBuf>) -> Self {
         self.transcript_dir = transcript_dir;
+        self
+    }
+
+    #[cfg(feature = "debug-recordings")]
+    pub fn with_record_dir(mut self, record_dir: Option<PathBuf>) -> Self {
+        self.record_dir = record_dir;
         self
     }
 
@@ -489,6 +501,19 @@ impl LiveTranscriber for FinalHttpTranscriber {
         session.session_pcm.finish().await;
         if raw_pcm.is_empty() {
             anyhow::bail!("recording stopped before any audio was captured");
+        }
+        #[cfg(feature = "debug-recordings")]
+        if let Some(record_dir) = self.record_dir.as_deref() {
+            match preserve_recording_snapshot(record_dir, &raw_pcm, self.sample_rate, "final").await
+            {
+                Ok(path) => eprintln!(
+                    "speaches-scribe preserved MP3 recording at {}",
+                    path.display()
+                ),
+                Err(error) => {
+                    eprintln!("speaches-scribe failed to preserve MP3 recording: {error:#}")
+                }
+            }
         }
         let final_audio = build_final_transcription_audio(self.sample_rate, &raw_pcm);
         eprintln!(
@@ -706,10 +731,31 @@ async fn preserve_transcript_snapshot(
     Ok(path)
 }
 
+#[cfg(feature = "debug-recordings")]
+pub async fn preserve_recording_snapshot(
+    record_dir: &Path,
+    pcm: &[u8],
+    sample_rate: u32,
+    label: &str,
+) -> anyhow::Result<PathBuf> {
+    let path = record_dir.join(recording_file_name(label));
+    write_pcm_mp3(&path, pcm, sample_rate).await?;
+    Ok(path)
+}
+
 fn transcript_file_name(label: &str) -> String {
     let counter = TEMP_AUDIO_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!(
         "speaches-scribe-{label}-{}-{counter}.txt",
+        std::process::id()
+    )
+}
+
+#[cfg(feature = "debug-recordings")]
+fn recording_file_name(label: &str) -> String {
+    let counter = TEMP_AUDIO_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "speaches-scribe-{label}-{}-{counter}.mp3",
         std::process::id()
     )
 }
@@ -802,6 +848,15 @@ mod tests {
             tokio::fs::read_to_string(&path).await.unwrap(),
             "hello window"
         );
+    }
+
+    #[cfg(feature = "debug-recordings")]
+    #[test]
+    fn recording_snapshot_names_use_mp3_extension() {
+        let name = recording_file_name("realtime");
+
+        assert!(name.starts_with("speaches-scribe-realtime-"));
+        assert!(name.ends_with(".mp3"));
     }
 
     #[test]

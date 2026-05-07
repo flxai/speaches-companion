@@ -1,3 +1,5 @@
+#[cfg(feature = "debug-recordings")]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +21,8 @@ use crate::audio::{
 use crate::config::{health_url, realtime_ws_url, DictateLiveConfig};
 use crate::event::{classify_event, RealtimeEvent};
 use crate::phase::{PhaseGate, PhaseResult};
+#[cfg(feature = "debug-recordings")]
+use crate::streaming::preserve_recording_snapshot;
 use crate::streaming::{LiveTranscriber, LiveTranscriptUpdate, LiveTranscriptionSession};
 use crate::trace::TraceWriter;
 
@@ -38,6 +42,8 @@ pub struct RealtimeTranscriber {
     model: String,
     language: Option<String>,
     capture: Arc<Mutex<Option<StreamingPcmCapture>>>,
+    #[cfg(feature = "debug-recordings")]
+    record_dir: Option<PathBuf>,
     preroll: Duration,
     sample_rate: u32,
 }
@@ -182,6 +188,8 @@ impl RealtimeTranscriber {
             model,
             language,
             capture: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "debug-recordings")]
+            record_dir: None,
             preroll: Duration::from_millis(750),
             sample_rate: SAMPLE_RATE,
         }
@@ -189,6 +197,12 @@ impl RealtimeTranscriber {
 
     pub fn with_preroll(mut self, preroll: Duration) -> Self {
         self.preroll = preroll;
+        self
+    }
+
+    #[cfg(feature = "debug-recordings")]
+    pub fn with_record_dir(mut self, record_dir: Option<PathBuf>) -> Self {
+        self.record_dir = record_dir;
         self
     }
 
@@ -269,10 +283,20 @@ impl LiveTranscriber for RealtimeTranscriber {
         let (updates_tx, updates_rx) = mpsc::channel::<LiveTranscriptUpdate>(32);
         let (stop_tx, stop_rx) = watch::channel(false);
         let receiver_stop_rx = stop_rx.clone();
+        #[cfg(feature = "debug-recordings")]
+        let record_dir = self.record_dir.clone();
         let sample_rate = self.sample_rate;
 
         let sender_task = tokio::spawn(async move {
-            stream_realtime_session_audio(pcm_session, sample_rate, stop_rx, &mut sink).await
+            stream_realtime_session_audio(
+                pcm_session,
+                sample_rate,
+                stop_rx,
+                &mut sink,
+                #[cfg(feature = "debug-recordings")]
+                record_dir,
+            )
+            .await
         });
         let receiver_task = tokio::spawn(async move {
             let mut transcript = RealtimeTranscriptAccumulator::default();
@@ -385,6 +409,7 @@ async fn stream_realtime_session_audio<S>(
     sample_rate: u32,
     mut stop_rx: watch::Receiver<bool>,
     sink: &mut S,
+    #[cfg(feature = "debug-recordings")] record_dir: Option<PathBuf>,
 ) -> Result<usize>
 where
     S: SinkExt<Message> + Unpin,
@@ -412,6 +437,22 @@ where
         Result::<usize>::Ok(total_sent)
     }
     .await;
+    #[cfg(feature = "debug-recordings")]
+    {
+        if let Some(record_dir) = record_dir.as_deref() {
+            let snapshot = pcm_session.snapshot().await;
+            match preserve_recording_snapshot(record_dir, &snapshot, sample_rate, "realtime").await
+            {
+                Ok(path) => eprintln!(
+                    "speaches-scribe preserved MP3 recording at {}",
+                    path.display()
+                ),
+                Err(error) => {
+                    eprintln!("speaches-scribe failed to preserve MP3 recording: {error:#}")
+                }
+            }
+        }
+    }
     pcm_session.finish().await;
     result
 }

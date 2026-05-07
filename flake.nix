@@ -21,6 +21,9 @@
         version = "0.3.0";
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
+        buildFeatures = [
+          "debug-recordings"
+        ];
         buildInputs = [
           pkgs.xdotool
         ];
@@ -40,7 +43,7 @@
           ];
           postInstall = ''
             wrapProgram "$out/bin/speaches-scribe" \
-              --prefix PATH : ${lib.makeBinPath [pkgs.pipewire pkgs.sway pkgs.wtype pkgs.xclip]}
+              --prefix PATH : ${lib.makeBinPath [pkgs.ffmpeg pkgs.pipewire pkgs.sway pkgs.wtype pkgs.xclip]}
           '';
         });
 
@@ -73,7 +76,7 @@
           '';
           checkPhase = ''
             runHook preCheck
-            cargo clippy --offline --workspace --all-targets -- -D warnings
+            cargo clippy --offline --workspace --all-targets --features debug-recordings -- -D warnings
             runHook postCheck
           '';
           installPhase = ''
@@ -94,7 +97,7 @@
           '';
           checkPhase = ''
             runHook preCheck
-            cargo test --offline --quiet
+            cargo test --offline --quiet --features debug-recordings
             runHook postCheck
           '';
           installPhase = ''
@@ -157,6 +160,7 @@
         ];
         packages = with pkgs; [
           cargo
+          ffmpeg
           pipewire
           pkg-config
           rust-analyzer

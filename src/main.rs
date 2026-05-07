@@ -67,6 +67,9 @@ struct DaemonArgs {
     language: Option<String>,
     #[arg(long)]
     transcript_dir: Option<PathBuf>,
+    #[cfg(feature = "debug-recordings")]
+    #[arg(long)]
+    record_dir: Option<PathBuf>,
     #[arg(long, conflicts_with = "no_stream_response")]
     stream_response: bool,
     #[arg(long)]
@@ -238,6 +241,13 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
             transcript_dir.display()
         );
     }
+    #[cfg(feature = "debug-recordings")]
+    if let Some(record_dir) = daemon_settings.record_dir.as_ref() {
+        eprintln!(
+            "speaches-scribe preserving MP3 recordings in {}",
+            record_dir.display()
+        );
+    }
     let config = resolve_config(stt_config_input(
         args.base_url,
         args.model,
@@ -247,6 +257,8 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     if daemon_settings.realtime_partials {
         let transcriber = RealtimeTranscriber::new(config.base_url, config.model, config.language)
             .with_preroll(Duration::from_millis(daemon_settings.preroll_ms));
+        #[cfg(feature = "debug-recordings")]
+        let transcriber = transcriber.with_record_dir(daemon_settings.record_dir.clone());
         match prepare_realtime_daemon_transcriber(transcriber).await {
             Ok(transcriber) => {
                 run_streaming_daemon(socket_path, daemon_settings, transcriber).await
@@ -272,6 +284,8 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
         .with_leading_silence(Duration::from_millis(daemon_settings.leading_silence_ms))
         .with_preroll(Duration::from_millis(daemon_settings.preroll_ms))
         .with_transcript_dir(daemon_settings.transcript_dir.clone());
+        #[cfg(feature = "debug-recordings")]
+        let transcriber = transcriber.with_record_dir(daemon_settings.record_dir.clone());
         eprintln!("speaches-scribe starting continuous audio capture...");
         if let Err(error) = transcriber.prepare_capture().await {
             eprintln!("speaches-scribe failed to start continuous audio capture: {error:#}");
@@ -358,6 +372,8 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DaemonSettings {
     transcript_dir: Option<PathBuf>,
+    #[cfg(feature = "debug-recordings")]
+    record_dir: Option<PathBuf>,
     stream_response: bool,
     realtime_partials: bool,
     listening_marker: Option<String>,
@@ -373,6 +389,11 @@ fn resolve_daemon_settings(args: &DaemonArgs, file_config: &FileConfig) -> Daemo
             .transcript_dir
             .clone()
             .or_else(|| file_config.dictation.transcript_dir.clone()),
+        #[cfg(feature = "debug-recordings")]
+        record_dir: args
+            .record_dir
+            .clone()
+            .or_else(|| file_config.dictation.record_dir.clone()),
         stream_response: resolve_stream_response(args, file_config),
         realtime_partials: resolve_realtime_partials(args, file_config),
         listening_marker: resolve_listening_marker(args, file_config),
@@ -868,6 +889,8 @@ mod tests {
         let file_config = FileConfig {
             dictation: DictationFileConfig {
                 transcript_dir: Some(PathBuf::from("transcripts")),
+                #[cfg(feature = "debug-recordings")]
+                record_dir: Some(PathBuf::from("recordings")),
                 stream_response: Some(true),
                 realtime_partials: Some(true),
                 listening_marker: Some("...".to_string()),
@@ -882,6 +905,8 @@ mod tests {
         let settings = resolve_daemon_settings(&args, &file_config);
 
         assert_eq!(settings.transcript_dir, Some(PathBuf::from("transcripts")));
+        #[cfg(feature = "debug-recordings")]
+        assert_eq!(settings.record_dir, Some(PathBuf::from("recordings")));
         assert!(settings.stream_response);
         assert!(settings.realtime_partials);
         assert_eq!(settings.listening_marker, Some("...".to_string()));
@@ -981,6 +1006,28 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "debug-recordings")]
+    #[test]
+    fn daemon_accepts_record_dir() {
+        let args = parse_daemon_args([
+            "speaches-scribe",
+            "daemon",
+            "--record-dir",
+            "target/speaches-scribe-recordings",
+        ]);
+        let settings = resolve_daemon_settings(&args, &FileConfig::default());
+
+        assert_eq!(
+            args.record_dir,
+            Some(PathBuf::from("target/speaches-scribe-recordings"))
+        );
+        assert_eq!(
+            settings.record_dir,
+            Some(PathBuf::from("target/speaches-scribe-recordings"))
+        );
+    }
+
+    #[cfg(not(feature = "debug-recordings"))]
     #[test]
     fn daemon_rejects_record_dir() {
         assert!(Cli::try_parse_from([

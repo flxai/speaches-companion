@@ -63,6 +63,7 @@ player_args = ["--raw", "--rate", "24000", "--channels", "1", "--format", "s16"]
 
 [dictation]
 transcript_dir = "target/speaches-scribe-transcripts"
+record_dir = "target/speaches-scribe-recordings"
 stream_response = false
 realtime_partials = false
 listening_marker = "💬"
@@ -137,12 +138,22 @@ nix run . -- daemon --leading-silence-ms 400
 nix run . -- daemon --preroll-ms 1000
 ```
 
-To preserve the accepted partial and final transcripts without writing debug
-audio into a project directory:
+To preserve accepted transcripts, set a transcript directory:
 
 ```sh
 nix run . -- daemon --transcript-dir target/speaches-scribe-transcripts
 ```
+
+The Nix flake build also enables the `debug-recordings` Cargo feature and wraps
+`ffmpeg`, so MP3 recording snapshots can be explicitly enabled with a recording
+directory:
+
+```sh
+nix run . -- daemon --record-dir target/speaches-scribe-recordings
+```
+
+Plain Cargo builds keep `--record-dir` unavailable unless compiled with
+`--features debug-recordings`.
 
 Speaches SSE transcription responses can be tested with:
 

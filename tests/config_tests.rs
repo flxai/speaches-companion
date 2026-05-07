@@ -209,6 +209,28 @@ preroll_ms = 1000
     assert_eq!(config.dictation.preroll_ms, Some(1000));
 }
 
+#[cfg(feature = "debug-recordings")]
+#[test]
+fn loads_record_dir_from_toml_file_config() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[dictation]
+record_dir = "recordings"
+"#,
+    )
+    .unwrap();
+
+    let config = load_file_config_at(&config_path).unwrap();
+
+    assert_eq!(
+        config.dictation.record_dir.as_deref(),
+        Some(Path::new("recordings"))
+    );
+}
+
 #[test]
 fn missing_toml_config_uses_defaults() {
     let dir = tempdir().unwrap();

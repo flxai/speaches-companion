@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use tokio::io::AsyncReadExt;
+#[cfg(feature = "debug-recordings")]
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -418,6 +420,57 @@ pub async fn write_pcm_wav(path: &Path, pcm: &[u8], sample_rate: u32) -> Result<
     tokio::fs::write(path, wav)
         .await
         .with_context(|| format!("failed to write WAV file {}", path.display()))
+}
+
+#[cfg(feature = "debug-recordings")]
+pub async fn write_pcm_mp3(path: &Path, pcm: &[u8], sample_rate: u32) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let mut child = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "s16le",
+            "-ar",
+            &sample_rate.to_string(),
+            "-ac",
+            &CHANNELS.to_string(),
+            "-i",
+            "pipe:0",
+            "-codec:a",
+            "libmp3lame",
+            "-q:a",
+            "2",
+            "-y",
+        ])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("failed to start ffmpeg for MP3 recording snapshot")?;
+
+    let mut stdin = child.stdin.take().context("ffmpeg did not expose stdin")?;
+    stdin
+        .write_all(pcm)
+        .await
+        .context("failed to stream PCM into ffmpeg")?;
+    drop(stdin);
+
+    let status = child
+        .wait()
+        .await
+        .context("failed to wait for ffmpeg MP3 encoder")?;
+    if !status.success() {
+        bail!("ffmpeg failed to encode MP3 recording snapshot: {status}");
+    }
+
+    Ok(())
 }
 
 pub async fn record_wav_with_pw_record(
