@@ -26,6 +26,13 @@ use speaches_companion::tts::{
     normalize_read_aloud_text, play_audio_file, selected_or_clipboard_text, synthesize_speech,
     write_speech_temp_file, SpeechOptions,
 };
+use speaches_companion::wakeword::{
+    default_wakeword_root, ensure_wakeword_model, run_wakeword_loop, WakewordRunConfig,
+    WakewordSettings, DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS, DEFAULT_WAKEWORD_FRAME_MS,
+    DEFAULT_WAKEWORD_MAX_RECORDING_MS, DEFAULT_WAKEWORD_NAME, DEFAULT_WAKEWORD_SAMPLE_COUNT,
+    DEFAULT_WAKEWORD_SAMPLE_DURATION_MS, DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS,
+    DEFAULT_WAKEWORD_THRESHOLD,
+};
 
 const DEFAULT_LISTENING_MARKER: &str = "💬";
 const DEFAULT_INJECT_DELAY_MICROSECS: u32 = 0;
@@ -55,6 +62,7 @@ enum Command {
     RealtimeCheck(RealtimeCheckArgs),
     Smoke(SmokeArgs),
     Transcribe(TranscribeArgs),
+    Wakeword(WakewordArgs),
 }
 
 #[derive(Debug, Args)]
@@ -128,6 +136,46 @@ struct DictateLiveArgs {
     duration_seconds: Option<u64>,
     #[arg(long)]
     trace_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct WakewordArgs {
+    #[arg(default_value = DEFAULT_WAKEWORD_NAME)]
+    name: String,
+    #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long)]
+    base_url: Option<String>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    language: Option<String>,
+    #[arg(long)]
+    root_dir: Option<PathBuf>,
+    #[arg(long)]
+    threshold: Option<f32>,
+    #[arg(long)]
+    frame_ms: Option<u64>,
+    #[arg(long)]
+    silence_timeout_ms: Option<u64>,
+    #[arg(long)]
+    activation_grace_ms: Option<u64>,
+    #[arg(long)]
+    max_recording_ms: Option<u64>,
+    #[arg(long)]
+    sample_count: Option<usize>,
+    #[arg(long)]
+    sample_duration_ms: Option<u64>,
+    #[arg(long)]
+    training_command: Option<String>,
+    #[arg(long)]
+    retrain: bool,
+    #[arg(long, conflicts_with = "no_append_space")]
+    append_space: bool,
+    #[arg(long)]
+    no_append_space: bool,
+    #[arg(long)]
+    inject_delay_microsecs: Option<u32>,
 }
 
 #[derive(Debug, Args)]
@@ -246,6 +294,7 @@ async fn main() -> ExitCode {
         Command::RealtimeCheck(args) => run_realtime_check_command(args).await,
         Command::Smoke(args) => run_smoke_command(args).await,
         Command::Transcribe(args) => run_transcribe_command(args).await,
+        Command::Wakeword(args) => run_wakeword_command(args).await,
     }
 }
 
@@ -320,6 +369,48 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
             Err(error) => eprintln!("speaches-companion transcription warmup failed: {error:#}"),
         }
         run_streaming_daemon(socket_path, daemon_settings, transcriber).await
+    }
+}
+
+async fn run_wakeword_command(args: WakewordArgs) -> ExitCode {
+    let file_config = match load_command_file_config(args.config.clone()) {
+        Ok(file_config) => file_config,
+        Err(exit_code) => return exit_code,
+    };
+    let config = resolve_config(stt_config_input(
+        args.base_url.clone(),
+        args.model.clone(),
+        args.language.clone(),
+        &file_config,
+    ));
+    let settings = resolve_wakeword_settings(&args, &file_config);
+    if args.retrain {
+        if let Err(error) = ensure_wakeword_model(&settings, true).await {
+            eprintln!("speaches-companion wakeword training failed: {error:#}");
+            return ExitCode::from(1);
+        }
+    }
+    let run_config = WakewordRunConfig {
+        settings,
+        base_url: config.base_url,
+        stt_options: TranscribeOptions {
+            model: config.model,
+            response_format: ResponseFormat::Text,
+            language: config.language,
+            prompt: None,
+            hotwords: None,
+            without_timestamps: true,
+            stream: false,
+        },
+        append_space: resolve_wakeword_append_space(&args, &file_config),
+    };
+    let injector = DesktopTextInjector::new(resolve_wakeword_inject_delay(&args, &file_config));
+    match run_wakeword_loop(run_config, injector).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("speaches-companion wakeword failed: {error:#}");
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -457,6 +548,54 @@ fn resolve_daemon_settings(args: &DaemonArgs, file_config: &FileConfig) -> Daemo
     }
 }
 
+fn resolve_wakeword_settings(args: &WakewordArgs, file_config: &FileConfig) -> WakewordSettings {
+    WakewordSettings {
+        name: args.name.clone(),
+        root_dir: args
+            .root_dir
+            .clone()
+            .or_else(|| file_config.wakeword.root_dir.clone())
+            .unwrap_or_else(default_wakeword_root),
+        threshold: args
+            .threshold
+            .or(file_config.wakeword.threshold)
+            .unwrap_or(DEFAULT_WAKEWORD_THRESHOLD),
+        frame: Duration::from_millis(
+            args.frame_ms
+                .or(file_config.wakeword.frame_ms)
+                .unwrap_or(DEFAULT_WAKEWORD_FRAME_MS),
+        ),
+        silence_timeout: Duration::from_millis(
+            args.silence_timeout_ms
+                .or(file_config.wakeword.silence_timeout_ms)
+                .unwrap_or(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS),
+        ),
+        sample_count: args
+            .sample_count
+            .or(file_config.wakeword.sample_count)
+            .unwrap_or(DEFAULT_WAKEWORD_SAMPLE_COUNT),
+        sample_duration: Duration::from_millis(
+            args.sample_duration_ms
+                .or(file_config.wakeword.sample_duration_ms)
+                .unwrap_or(DEFAULT_WAKEWORD_SAMPLE_DURATION_MS),
+        ),
+        training_command: args
+            .training_command
+            .clone()
+            .or_else(|| file_config.wakeword.training_command.clone()),
+        activation_grace: Duration::from_millis(
+            args.activation_grace_ms
+                .or(file_config.wakeword.activation_grace_ms)
+                .unwrap_or(DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS),
+        ),
+        max_recording: Duration::from_millis(
+            args.max_recording_ms
+                .or(file_config.wakeword.max_recording_ms)
+                .unwrap_or(DEFAULT_WAKEWORD_MAX_RECORDING_MS),
+        ),
+    }
+}
+
 fn resolve_realtime_partials(args: &DaemonArgs, file_config: &FileConfig) -> bool {
     if args.realtime_partials {
         true
@@ -530,6 +669,22 @@ fn resolve_append_space(args: &DaemonArgs, file_config: &FileConfig) -> bool {
     } else {
         file_config.dictation.append_space.unwrap_or(true)
     }
+}
+
+fn resolve_wakeword_append_space(args: &WakewordArgs, file_config: &FileConfig) -> bool {
+    if args.append_space {
+        true
+    } else if args.no_append_space {
+        false
+    } else {
+        file_config.dictation.append_space.unwrap_or(true)
+    }
+}
+
+fn resolve_wakeword_inject_delay(args: &WakewordArgs, file_config: &FileConfig) -> u32 {
+    args.inject_delay_microsecs
+        .or(file_config.dictation.inject_delay_microsecs)
+        .unwrap_or(DEFAULT_INJECT_DELAY_MICROSECS)
 }
 
 async fn run_hotkey_command(args: HotkeyArgs) -> ExitCode {
@@ -890,7 +1045,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use speaches_companion::config::DictationFileConfig;
+    use speaches_companion::config::{DictationFileConfig, WakewordFileConfig};
 
     #[tokio::test]
     async fn hotkey_connection_error_sends_desktop_error_notification() {
@@ -1131,6 +1286,98 @@ mod tests {
     }
 
     #[test]
+    fn wakeword_defaults_to_default_name_and_config_values() {
+        let args = parse_wakeword_args(["speaches-companion", "wakeword"]);
+        let settings = resolve_wakeword_settings(&args, &FileConfig::default());
+
+        assert_eq!(settings.name, DEFAULT_WAKEWORD_NAME);
+        assert_eq!(settings.threshold, DEFAULT_WAKEWORD_THRESHOLD);
+        assert_eq!(
+            settings.silence_timeout,
+            Duration::from_millis(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS)
+        );
+        assert_eq!(settings.sample_count, DEFAULT_WAKEWORD_SAMPLE_COUNT);
+        assert_eq!(settings.training_command, None);
+    }
+
+    #[test]
+    fn wakeword_reads_settings_from_file_config() {
+        let args = parse_wakeword_args(["speaches-companion", "wakeword", "aurgob"]);
+        let file_config = FileConfig {
+            wakeword: WakewordFileConfig {
+                root_dir: Some(PathBuf::from("/tmp/wakewords")),
+                threshold: Some(0.72),
+                frame_ms: Some(40),
+                silence_timeout_ms: Some(700),
+                sample_count: Some(12),
+                sample_duration_ms: Some(1_200),
+                training_command: Some("train-wakeword".to_string()),
+                activation_grace_ms: Some(4_000),
+                max_recording_ms: Some(20_000),
+            },
+            ..FileConfig::default()
+        };
+
+        let settings = resolve_wakeword_settings(&args, &file_config);
+
+        assert_eq!(settings.name, "aurgob");
+        assert_eq!(settings.root_dir, PathBuf::from("/tmp/wakewords"));
+        assert_eq!(settings.threshold, 0.72);
+        assert_eq!(settings.frame, Duration::from_millis(40));
+        assert_eq!(settings.silence_timeout, Duration::from_millis(700));
+        assert_eq!(settings.sample_count, 12);
+        assert_eq!(settings.sample_duration, Duration::from_millis(1_200));
+        assert_eq!(settings.training_command.as_deref(), Some("train-wakeword"));
+        assert_eq!(settings.activation_grace, Duration::from_millis(4_000));
+        assert_eq!(settings.max_recording, Duration::from_millis(20_000));
+    }
+
+    #[test]
+    fn wakeword_cli_overrides_file_config() {
+        let args = parse_wakeword_args([
+            "speaches-companion",
+            "wakeword",
+            "samantha",
+            "--root-dir",
+            "/tmp/cli-wakewords",
+            "--threshold",
+            "0.8",
+            "--sample-count",
+            "10",
+            "--training-command",
+            "custom-train",
+            "--no-append-space",
+            "--inject-delay-microsecs",
+            "3000",
+        ]);
+        let file_config = FileConfig {
+            wakeword: WakewordFileConfig {
+                root_dir: Some(PathBuf::from("/tmp/file-wakewords")),
+                threshold: Some(0.4),
+                sample_count: Some(3),
+                training_command: Some("file-train".to_string()),
+                ..WakewordFileConfig::default()
+            },
+            dictation: DictationFileConfig {
+                append_space: Some(true),
+                inject_delay_microsecs: Some(40),
+                ..DictationFileConfig::default()
+            },
+            ..FileConfig::default()
+        };
+
+        let settings = resolve_wakeword_settings(&args, &file_config);
+
+        assert_eq!(settings.name, "samantha");
+        assert_eq!(settings.root_dir, PathBuf::from("/tmp/cli-wakewords"));
+        assert_eq!(settings.threshold, 0.8);
+        assert_eq!(settings.sample_count, 10);
+        assert_eq!(settings.training_command.as_deref(), Some("custom-train"));
+        assert!(!resolve_wakeword_append_space(&args, &file_config));
+        assert_eq!(resolve_wakeword_inject_delay(&args, &file_config), 3_000);
+    }
+
+    #[test]
     fn daemon_accepts_transcript_dir() {
         let args = parse_daemon_args([
             "speaches-companion",
@@ -1245,6 +1492,13 @@ mod tests {
         match Cli::parse_from(args).command {
             Command::Daemon(args) => args,
             _ => panic!("expected daemon command"),
+        }
+    }
+
+    fn parse_wakeword_args<const N: usize>(args: [&str; N]) -> WakewordArgs {
+        match Cli::parse_from(args).command {
+            Command::Wakeword(args) => args,
+            _ => panic!("expected wakeword command"),
         }
     }
 

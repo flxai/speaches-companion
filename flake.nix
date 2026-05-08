@@ -151,6 +151,7 @@
         "realtime-check" = mkSubcommandApp "realtime-check" "Check Speaches realtime WebSocket readiness";
         smoke = mkSubcommandApp "smoke" "Run a microphone and STT smoke test";
         transcribe = mkSubcommandApp "transcribe" "Transcribe an audio file";
+        wakeword = mkSubcommandApp "wakeword" "Run hands-free wake-word dictation";
       };
 
       devShells.default = pkgs.mkShell {

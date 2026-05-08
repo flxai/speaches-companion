@@ -35,6 +35,12 @@ pub struct StreamingPcmBuffer {
     bytes_seen: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamingPcmSnapshot {
+    pub pcm: Vec<u8>,
+    pub bytes_seen: usize,
+}
+
 impl StreamingPcmBuffer {
     fn new(sample_rate: u32, idle_retain: Duration) -> Self {
         Self {
@@ -169,6 +175,14 @@ impl StreamingPcmSession {
         let mut pcm = self.pcm.lock().await;
         pcm.active_sessions = pcm.active_sessions.saturating_sub(1);
         pcm.trim_if_idle();
+    }
+}
+
+pub async fn snapshot_streaming_pcm(pcm: &SharedPcmBuffer) -> StreamingPcmSnapshot {
+    let pcm = pcm.lock().await;
+    StreamingPcmSnapshot {
+        pcm: pcm.pcm.clone(),
+        bytes_seen: pcm.bytes_seen,
     }
 }
 
@@ -344,7 +358,7 @@ async fn wait_for_streaming_pcm(pcm: &SharedPcmBuffer, timeout: Duration) -> Res
     Ok(())
 }
 
-fn pcm_bytes_for_duration(sample_rate: u32, duration: Duration) -> usize {
+pub fn pcm_bytes_for_duration(sample_rate: u32, duration: Duration) -> usize {
     let samples = duration.as_secs_f64() * f64::from(sample_rate);
     samples.ceil() as usize * usize::from(CHANNELS) * 2
 }

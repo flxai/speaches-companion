@@ -13,3 +13,4 @@ pub mod streaming;
 pub mod stt;
 pub mod trace;
 pub mod tts;
+pub mod wakeword;

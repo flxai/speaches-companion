@@ -37,12 +37,13 @@ nix run .#hotkey -- down
 nix run .#hotkey -- up
 nix run .#read-aloud -- --text "hello from Speaches"
 nix run .#realtime-check
+nix run .#wakeword
 ```
 
 `speaches-companion` reads configuration from
 `$XDG_CONFIG_HOME/speaches-companion/config.toml`, falling back to
 `~/.config/speaches-companion/config.toml`. Use `--config` on `daemon`,
-`read-aloud`, `transcribe`, `smoke`, and `dictate-live`, or set
+`read-aloud`, `transcribe`, `smoke`, `dictate-live`, and `wakeword`, or set
 `SPEACHES_COMPANION_CONFIG`, to point at another file. Missing config files are
 treated as empty.
 
@@ -74,6 +75,17 @@ append_space = true
 inject_delay_microsecs = 3000
 leading_silence_ms = 250
 preroll_ms = 750
+
+[wakeword]
+# root_dir defaults to $XDG_DATA_HOME/speaches-companion/wakewords
+threshold = 0.5
+frame_ms = 80
+silence_timeout_ms = 900
+sample_count = 10
+sample_duration_ms = 1500
+training_command = "openwakeword-train"
+activation_grace_ms = 5000
+max_recording_ms = 30000
 ```
 
 For compatible existing setups, environment and CLI values still work. The
@@ -165,6 +177,26 @@ nix run . -- daemon --record-dir target/speaches-companion-recordings
 
 Plain Cargo builds keep `--record-dir` unavailable unless compiled with
 `--features debug-recordings`.
+
+Wake-word dictation runs separately from the hotkey daemon:
+
+```sh
+nix run . -- wakeword
+nix run . -- wakeword samantha --threshold 0.7
+nix run . -- wakeword aurgob --retrain
+```
+
+`wakeword [name]` defaults to `default` and stores artifacts under
+`wakeword.root_dir/<name>/`; unset `root_dir` defaults to
+`$XDG_DATA_HOME/speaches-companion/wakewords` or
+`~/.local/share/speaches-companion/wakewords`. If `model.onnx` is missing, it records
+`sample_count` wake phrase samples, copies them into a preprocessed sample
+directory, and runs `training_command`. The command receives environment
+variables including `SPEACHES_COMPANION_WAKEWORD_SAMPLES_DIR` and
+`SPEACHES_COMPANION_WAKEWORD_MODEL`; it must write the runtime ONNX model to
+that model path. Runtime inference is local Rust ONNX; Speaches STT is only used
+after a wake detection, and dictation stops after `silence_timeout_ms` of
+silence.
 
 Speaches SSE transcription responses can be tested with:
 

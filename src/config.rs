@@ -26,6 +26,8 @@ pub struct FileConfig {
     pub tts: TtsFileConfig,
     #[serde(default)]
     pub dictation: DictationFileConfig,
+    #[serde(default)]
+    pub wakeword: WakewordFileConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -67,6 +69,19 @@ pub struct DictationFileConfig {
     pub inject_delay_microsecs: Option<u32>,
     pub leading_silence_ms: Option<u64>,
     pub preroll_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct WakewordFileConfig {
+    pub root_dir: Option<PathBuf>,
+    pub threshold: Option<f32>,
+    pub frame_ms: Option<u64>,
+    pub silence_timeout_ms: Option<u64>,
+    pub sample_count: Option<usize>,
+    pub sample_duration_ms: Option<u64>,
+    pub training_command: Option<String>,
+    pub activation_grace_ms: Option<u64>,
+    pub max_recording_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

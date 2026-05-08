@@ -183,6 +183,17 @@ append_space = false
 inject_delay_microsecs = 3000
 leading_silence_ms = 400
 preroll_ms = 1000
+
+[wakeword]
+root_dir = "wakewords"
+threshold = 0.7
+frame_ms = 80
+silence_timeout_ms = 900
+sample_count = 10
+sample_duration_ms = 1500
+training_command = "train-wakeword"
+activation_grace_ms = 5000
+max_recording_ms = 30000
 "#,
     )
     .unwrap();
@@ -217,6 +228,21 @@ preroll_ms = 1000
     assert_eq!(config.dictation.inject_delay_microsecs, Some(3_000));
     assert_eq!(config.dictation.leading_silence_ms, Some(400));
     assert_eq!(config.dictation.preroll_ms, Some(1000));
+    assert_eq!(
+        config.wakeword.root_dir.as_deref(),
+        Some(Path::new("wakewords"))
+    );
+    assert_eq!(config.wakeword.threshold, Some(0.7));
+    assert_eq!(config.wakeword.frame_ms, Some(80));
+    assert_eq!(config.wakeword.silence_timeout_ms, Some(900));
+    assert_eq!(config.wakeword.sample_count, Some(10));
+    assert_eq!(config.wakeword.sample_duration_ms, Some(1500));
+    assert_eq!(
+        config.wakeword.training_command.as_deref(),
+        Some("train-wakeword")
+    );
+    assert_eq!(config.wakeword.activation_grace_ms, Some(5000));
+    assert_eq!(config.wakeword.max_recording_ms, Some(30000));
 }
 
 #[cfg(feature = "debug-recordings")]
