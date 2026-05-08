@@ -7,6 +7,7 @@ use speaches_companion::config::{
     DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_TTS_MODEL, DEFAULT_TTS_PLAYER,
     DEFAULT_TTS_RESPONSE_FORMAT, DEFAULT_TTS_SPEED, DEFAULT_TTS_VOICE,
 };
+use speaches_companion::wakeword::{OpenWakewordStockModel, WakewordEngine};
 use tempfile::tempdir;
 
 #[test]
@@ -185,6 +186,9 @@ leading_silence_ms = 400
 preroll_ms = 1000
 
 [wakeword]
+engine = "openwakeword"
+stock_model = "weather"
+assets_dir = "openwakeword-assets"
 root_dir = "wakewords"
 threshold = 0.7
 frame_ms = 80
@@ -231,6 +235,15 @@ max_recording_ms = 30000
     assert_eq!(
         config.wakeword.root_dir.as_deref(),
         Some(Path::new("wakewords"))
+    );
+    assert_eq!(config.wakeword.engine, Some(WakewordEngine::Openwakeword));
+    assert_eq!(
+        config.wakeword.stock_model,
+        Some(OpenWakewordStockModel::Weather)
+    );
+    assert_eq!(
+        config.wakeword.assets_dir.as_deref(),
+        Some(Path::new("openwakeword-assets"))
     );
     assert_eq!(config.wakeword.threshold, Some(0.7));
     assert_eq!(config.wakeword.frame_ms, Some(80));

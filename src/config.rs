@@ -8,6 +8,8 @@ use anyhow::{bail, Context};
 use serde::Deserialize;
 use url::Url;
 
+use crate::wakeword::{OpenWakewordStockModel, WakewordEngine};
+
 pub const DEFAULT_BASE_URL: &str = "http://ono.tail:8000";
 pub const DEFAULT_MODEL: &str = "Systran/faster-whisper-large-v3";
 pub const DEFAULT_TTS_MODEL: &str = "tts-1";
@@ -73,6 +75,9 @@ pub struct DictationFileConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct WakewordFileConfig {
+    pub engine: Option<WakewordEngine>,
+    pub stock_model: Option<OpenWakewordStockModel>,
+    pub assets_dir: Option<PathBuf>,
     pub root_dir: Option<PathBuf>,
     pub threshold: Option<f32>,
     pub frame_ms: Option<u64>,

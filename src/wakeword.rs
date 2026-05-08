@@ -1,10 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::time::{sleep, Instant};
@@ -26,12 +28,80 @@ pub const DEFAULT_WAKEWORD_SAMPLE_DURATION_MS: u64 = 1_500;
 pub const DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS: u64 = 900;
 pub const DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS: u64 = 5_000;
 pub const DEFAULT_WAKEWORD_MAX_RECORDING_MS: u64 = 30_000;
+pub const DEFAULT_OPENWAKEWORD_STOCK_MODEL: OpenWakewordStockModel = OpenWakewordStockModel::Alexa;
+
 const DEFAULT_WAKEWORD_IDLE_RETAIN_MS: u64 = 5_000;
+const OPENWAKEWORD_CACHE_DIR: &str = "_openwakeword";
+const OPENWAKEWORD_RELEASE_VERSION: &str = "v0.5.1";
+const OPENWAKEWORD_RELEASE_BASE_URL: &str =
+    "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1";
+const OPENWAKEWORD_MELSPECTROGRAM_FILENAME: &str = "melspectrogram.onnx";
+const OPENWAKEWORD_EMBEDDING_FILENAME: &str = "embedding_model.onnx";
+const OPENWAKEWORD_FRAME_SAMPLES: usize = 1_280;
+const OPENWAKEWORD_MELSPEC_CONTEXT_SAMPLES: usize = 160 * 3;
+const OPENWAKEWORD_MEL_BINS: usize = 32;
+const OPENWAKEWORD_MEL_WINDOW_FRAMES: usize = 76;
+const OPENWAKEWORD_MELSPEC_MAX_FRAMES: usize = 970;
+const OPENWAKEWORD_EMBEDDING_STEP_FRAMES: usize = 8;
+const OPENWAKEWORD_EMBEDDING_DIM: usize = 96;
+const OPENWAKEWORD_FEATURE_MAX_FRAMES: usize = 120;
+const OPENWAKEWORD_RAW_BUFFER_MAX_SAMPLES: usize = STT_SAMPLE_RATE as usize * 10;
+const OPENWAKEWORD_WARMUP_WINDOWS: usize = 5;
 const SPEECH_RMS_THRESHOLD: f64 = 700.0;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum WakewordEngine {
+    #[default]
+    Openwakeword,
+    Onnx,
+}
+
+impl WakewordEngine {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Openwakeword => "openwakeword",
+            Self::Onnx => "onnx",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpenWakewordStockModel {
+    #[default]
+    Alexa,
+    HeyMarvin,
+    Timer,
+    Weather,
+}
+
+impl OpenWakewordStockModel {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Alexa => "alexa",
+            Self::HeyMarvin => "hey-marvin",
+            Self::Timer => "timer",
+            Self::Weather => "weather",
+        }
+    }
+
+    fn asset_filename(self) -> &'static str {
+        match self {
+            Self::Alexa => "alexa_v0.1.onnx",
+            Self::HeyMarvin => "hey_marvin_v0.1.onnx",
+            Self::Timer => "timer_v0.1.onnx",
+            Self::Weather => "weather_v0.1.onnx",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WakewordSettings {
     pub name: String,
+    pub engine: WakewordEngine,
+    pub stock_model: OpenWakewordStockModel,
+    pub assets_dir: Option<PathBuf>,
     pub root_dir: PathBuf,
     pub threshold: f32,
     pub frame: Duration,
@@ -50,6 +120,9 @@ pub struct WakewordPaths {
     pub preprocessed_dir: PathBuf,
     pub model_path: PathBuf,
     pub metadata_path: PathBuf,
+    pub shared_assets_dir: PathBuf,
+    pub melspectrogram_path: PathBuf,
+    pub embedding_model_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,10 +141,13 @@ pub struct WakewordRunConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WakewordMetadata {
     name: String,
+    engine: WakewordEngine,
+    stock_model: Option<OpenWakewordStockModel>,
     threshold: f32,
     frame_ms: u64,
     sample_count: usize,
     model_path: PathBuf,
+    shared_assets_dir: Option<PathBuf>,
 }
 
 pub trait WakeScorer {
@@ -166,6 +242,307 @@ impl WakeScorer for OnnxWakeScorer {
     }
 }
 
+trait OpenWakewordBackend {
+    fn keyword_frames(&self) -> usize;
+
+    fn run_melspectrogram(&mut self, samples: &[i16]) -> anyhow::Result<Vec<f32>>;
+
+    fn run_embedding(&mut self, mel_window: &[f32]) -> anyhow::Result<Vec<f32>>;
+
+    fn run_keyword(&mut self, feature_window: &[f32]) -> anyhow::Result<f32>;
+}
+
+struct TractOpenWakewordBackend {
+    melspectrogram: Arc<TypedSimplePlan>,
+    embedding: Arc<TypedSimplePlan>,
+    keyword: Arc<TypedSimplePlan>,
+    keyword_frames: usize,
+}
+
+impl TractOpenWakewordBackend {
+    fn load(paths: &WakewordPaths) -> anyhow::Result<Self> {
+        let melspectrogram = tract_onnx::onnx()
+            .model_for_path(&paths.melspectrogram_path)
+            .with_context(|| {
+                format!(
+                    "failed to load openWakeWord melspectrogram model {}",
+                    paths.melspectrogram_path.display()
+                )
+            })?
+            .into_optimized()
+            .context("failed to optimize openWakeWord melspectrogram model")?
+            .into_runnable()
+            .context("failed to prepare openWakeWord melspectrogram model")?;
+
+        let embedding = tract_onnx::onnx()
+            .model_for_path(&paths.embedding_model_path)
+            .with_context(|| {
+                format!(
+                    "failed to load openWakeWord embedding model {}",
+                    paths.embedding_model_path.display()
+                )
+            })?
+            .into_optimized()
+            .context("failed to optimize openWakeWord embedding model")?
+            .into_runnable()
+            .context("failed to prepare openWakeWord embedding model")?;
+
+        let keyword_model = tract_onnx::onnx()
+            .model_for_path(&paths.model_path)
+            .with_context(|| {
+                format!(
+                    "failed to load openWakeWord keyword model {}",
+                    paths.model_path.display()
+                )
+            })?
+            .into_optimized()
+            .context("failed to optimize openWakeWord keyword model")?;
+        let keyword_frames = infer_keyword_frames(&keyword_model)?;
+        let keyword = keyword_model
+            .into_runnable()
+            .context("failed to prepare openWakeWord keyword model")?;
+
+        Ok(Self {
+            melspectrogram,
+            embedding,
+            keyword,
+            keyword_frames,
+        })
+    }
+}
+
+impl OpenWakewordBackend for TractOpenWakewordBackend {
+    fn keyword_frames(&self) -> usize {
+        self.keyword_frames
+    }
+
+    fn run_melspectrogram(&mut self, samples: &[i16]) -> anyhow::Result<Vec<f32>> {
+        let input = samples
+            .iter()
+            .map(|sample| f32::from(*sample))
+            .collect::<Vec<_>>();
+        let input = Tensor::from_shape(&[1, input.len()], &input)
+            .context("failed to build openWakeWord melspectrogram input")?;
+        let outputs = self
+            .melspectrogram
+            .run(tvec!(input.into()))
+            .context("openWakeWord melspectrogram inference failed")?;
+        let values = first_output_as_slice(&outputs, "openWakeWord melspectrogram output")?;
+        Ok(values.iter().map(|value| *value / 10.0 + 2.0).collect())
+    }
+
+    fn run_embedding(&mut self, mel_window: &[f32]) -> anyhow::Result<Vec<f32>> {
+        let input = Tensor::from_shape(
+            &[1, OPENWAKEWORD_MEL_WINDOW_FRAMES, OPENWAKEWORD_MEL_BINS, 1],
+            mel_window,
+        )
+        .context("failed to build openWakeWord embedding input")?;
+        let outputs = self
+            .embedding
+            .run(tvec!(input.into()))
+            .context("openWakeWord embedding inference failed")?;
+        Ok(first_output_as_slice(&outputs, "openWakeWord embedding output")?.to_vec())
+    }
+
+    fn run_keyword(&mut self, feature_window: &[f32]) -> anyhow::Result<f32> {
+        let input = Tensor::from_shape(
+            &[1, self.keyword_frames, OPENWAKEWORD_EMBEDDING_DIM],
+            feature_window,
+        )
+        .context("failed to build openWakeWord keyword input")?;
+        let outputs = self
+            .keyword
+            .run(tvec!(input.into()))
+            .context("openWakeWord keyword inference failed")?;
+        let scores = first_output_as_slice(&outputs, "openWakeWord keyword output")?;
+        scores
+            .iter()
+            .copied()
+            .reduce(f32::max)
+            .context("openWakeWord keyword output was empty")
+    }
+}
+
+struct OpenWakewordPipelineScorer<B> {
+    backend: B,
+    raw_data_buffer: VecDeque<i16>,
+    raw_data_remainder: Vec<i16>,
+    accumulated_samples: usize,
+    melspectrogram_buffer: Vec<f32>,
+    feature_buffer: Vec<f32>,
+    warmup_windows_remaining: usize,
+    last_score: f32,
+}
+
+impl OpenWakewordPipelineScorer<TractOpenWakewordBackend> {
+    fn load(paths: &WakewordPaths) -> anyhow::Result<Self> {
+        Self::with_backend(TractOpenWakewordBackend::load(paths)?)
+    }
+}
+
+impl<B> OpenWakewordPipelineScorer<B>
+where
+    B: OpenWakewordBackend,
+{
+    fn with_backend(backend: B) -> anyhow::Result<Self> {
+        let keyword_frames = backend.keyword_frames();
+        if keyword_frames == 0 {
+            bail!("openWakeWord keyword model must consume at least one feature frame");
+        }
+        Ok(Self {
+            backend,
+            raw_data_buffer: VecDeque::with_capacity(OPENWAKEWORD_RAW_BUFFER_MAX_SAMPLES),
+            raw_data_remainder: Vec::new(),
+            accumulated_samples: 0,
+            melspectrogram_buffer: vec![
+                1.0;
+                OPENWAKEWORD_MEL_WINDOW_FRAMES * OPENWAKEWORD_MEL_BINS
+            ],
+            feature_buffer: vec![0.0; OPENWAKEWORD_FEATURE_MAX_FRAMES * OPENWAKEWORD_EMBEDDING_DIM],
+            warmup_windows_remaining: OPENWAKEWORD_WARMUP_WINDOWS,
+            last_score: 0.0,
+        })
+    }
+
+    fn buffer_raw_data(&mut self, samples: &[i16]) {
+        self.raw_data_buffer.extend(samples.iter().copied());
+        while self.raw_data_buffer.len() > OPENWAKEWORD_RAW_BUFFER_MAX_SAMPLES {
+            self.raw_data_buffer.pop_front();
+        }
+    }
+
+    fn stream_melspectrogram(&mut self, new_sample_count: usize) -> anyhow::Result<()> {
+        if self.raw_data_buffer.len() < OPENWAKEWORD_MELSPEC_CONTEXT_SAMPLES {
+            bail!("openWakeWord needs at least 480 samples of context");
+        }
+
+        let take = (new_sample_count + OPENWAKEWORD_MELSPEC_CONTEXT_SAMPLES)
+            .min(self.raw_data_buffer.len());
+        let start = self.raw_data_buffer.len() - take;
+        let samples = self
+            .raw_data_buffer
+            .iter()
+            .skip(start)
+            .copied()
+            .collect::<Vec<_>>();
+        let mel = self.backend.run_melspectrogram(&samples)?;
+        if mel.len() % OPENWAKEWORD_MEL_BINS != 0 {
+            bail!(
+                "openWakeWord melspectrogram output {} is not divisible by {} mel bins",
+                mel.len(),
+                OPENWAKEWORD_MEL_BINS
+            );
+        }
+        self.melspectrogram_buffer.extend(mel);
+        trim_frame_buffer(
+            &mut self.melspectrogram_buffer,
+            OPENWAKEWORD_MEL_BINS,
+            OPENWAKEWORD_MELSPEC_MAX_FRAMES,
+        );
+        Ok(())
+    }
+
+    fn stream_features(&mut self, pcm: &[i16]) -> anyhow::Result<usize> {
+        let mut samples = if self.raw_data_remainder.is_empty() {
+            pcm.to_vec()
+        } else {
+            let mut merged = Vec::with_capacity(self.raw_data_remainder.len() + pcm.len());
+            merged.extend_from_slice(&self.raw_data_remainder);
+            merged.extend_from_slice(pcm);
+            self.raw_data_remainder.clear();
+            merged
+        };
+
+        if self.accumulated_samples + samples.len() >= OPENWAKEWORD_FRAME_SAMPLES {
+            let remainder = (self.accumulated_samples + samples.len()) % OPENWAKEWORD_FRAME_SAMPLES;
+            if remainder != 0 {
+                let even_len = samples.len() - remainder;
+                self.buffer_raw_data(&samples[..even_len]);
+                self.accumulated_samples += even_len;
+                self.raw_data_remainder = samples.split_off(even_len);
+            } else {
+                self.buffer_raw_data(&samples);
+                self.accumulated_samples += samples.len();
+            }
+        } else {
+            self.accumulated_samples += samples.len();
+            self.buffer_raw_data(&samples);
+        }
+
+        if self.accumulated_samples >= OPENWAKEWORD_FRAME_SAMPLES
+            && self.accumulated_samples % OPENWAKEWORD_FRAME_SAMPLES == 0
+        {
+            let new_frames = self.accumulated_samples / OPENWAKEWORD_FRAME_SAMPLES;
+            self.stream_melspectrogram(self.accumulated_samples)?;
+            for offset in (0..new_frames).rev() {
+                let mel_frames = frame_count(&self.melspectrogram_buffer, OPENWAKEWORD_MEL_BINS);
+                let end_frame = mel_frames - offset * OPENWAKEWORD_EMBEDDING_STEP_FRAMES;
+                let start_frame = end_frame.saturating_sub(OPENWAKEWORD_MEL_WINDOW_FRAMES);
+                if end_frame - start_frame != OPENWAKEWORD_MEL_WINDOW_FRAMES {
+                    continue;
+                }
+                let start = start_frame * OPENWAKEWORD_MEL_BINS;
+                let end = end_frame * OPENWAKEWORD_MEL_BINS;
+                let embedding = self
+                    .backend
+                    .run_embedding(&self.melspectrogram_buffer[start..end])?;
+                if embedding.len() != OPENWAKEWORD_EMBEDDING_DIM {
+                    bail!(
+                        "openWakeWord embedding output has {} values, expected {}",
+                        embedding.len(),
+                        OPENWAKEWORD_EMBEDDING_DIM
+                    );
+                }
+                self.feature_buffer.extend(embedding);
+            }
+            trim_frame_buffer(
+                &mut self.feature_buffer,
+                OPENWAKEWORD_EMBEDDING_DIM,
+                OPENWAKEWORD_FEATURE_MAX_FRAMES,
+            );
+            self.accumulated_samples = 0;
+            Ok(new_frames)
+        } else {
+            Ok(0)
+        }
+    }
+}
+
+impl<B> WakeScorer for OpenWakewordPipelineScorer<B>
+where
+    B: OpenWakewordBackend,
+{
+    fn score(&mut self, pcm: &[i16]) -> anyhow::Result<f32> {
+        let new_frames = self.stream_features(pcm)?;
+        if new_frames == 0 {
+            return Ok(self.last_score);
+        }
+
+        let keyword_frames = self.backend.keyword_frames();
+        let total_feature_frames = frame_count(&self.feature_buffer, OPENWAKEWORD_EMBEDDING_DIM);
+        let mut batch_max = 0.0f32;
+
+        for offset in (0..new_frames).rev() {
+            let end_frame = total_feature_frames - offset;
+            let start_frame = end_frame.saturating_sub(keyword_frames);
+            if end_frame - start_frame != keyword_frames {
+                continue;
+            }
+            let start = start_frame * OPENWAKEWORD_EMBEDDING_DIM;
+            let end = end_frame * OPENWAKEWORD_EMBEDDING_DIM;
+            let mut score = self.backend.run_keyword(&self.feature_buffer[start..end])?;
+            if self.warmup_windows_remaining > 0 {
+                score = 0.0;
+                self.warmup_windows_remaining -= 1;
+            }
+            batch_max = batch_max.max(score);
+        }
+
+        self.last_score = batch_max;
+        Ok(batch_max)
+    }
+}
+
 pub fn default_wakeword_root() -> PathBuf {
     default_wakeword_root_with_env(&std::env::vars().collect())
 }
@@ -200,12 +577,19 @@ pub fn validate_wakeword_name(name: &str) -> anyhow::Result<&str> {
 pub fn wakeword_paths(settings: &WakewordSettings) -> anyhow::Result<WakewordPaths> {
     let name = validate_wakeword_name(&settings.name)?;
     let root = settings.root_dir.join(name);
+    let shared_assets_dir = settings
+        .root_dir
+        .join(OPENWAKEWORD_CACHE_DIR)
+        .join(OPENWAKEWORD_RELEASE_VERSION);
     Ok(WakewordPaths {
         samples_dir: root.join("samples"),
         preprocessed_dir: root.join("preprocessed"),
         model_path: root.join("model.onnx"),
         metadata_path: root.join("metadata.json"),
+        melspectrogram_path: shared_assets_dir.join(OPENWAKEWORD_MELSPECTROGRAM_FILENAME),
+        embedding_model_path: shared_assets_dir.join(OPENWAKEWORD_EMBEDDING_FILENAME),
         root,
+        shared_assets_dir,
     })
 }
 
@@ -214,13 +598,63 @@ pub async fn ensure_wakeword_model(
     retrain: bool,
 ) -> anyhow::Result<WakewordPaths> {
     let paths = wakeword_paths(settings)?;
-    if !retrain && tokio::fs::metadata(&paths.model_path).await.is_ok() {
-        return Ok(paths);
+    tokio::fs::create_dir_all(&paths.root)
+        .await
+        .with_context(|| format!("failed to create {}", paths.root.display()))?;
+
+    match settings.engine {
+        WakewordEngine::Openwakeword => {
+            ensure_openwakeword_model(settings, &paths, retrain).await?
+        }
+        WakewordEngine::Onnx => ensure_legacy_onnx_model(settings, &paths, retrain).await?,
     }
 
-    collect_wakeword_samples(settings, &paths).await?;
-    prepare_training_samples(&paths).await?;
-    run_training_command(settings, &paths).await?;
+    write_metadata(settings, &paths).await?;
+    Ok(paths)
+}
+
+async fn ensure_openwakeword_model(
+    settings: &WakewordSettings,
+    paths: &WakewordPaths,
+    retrain: bool,
+) -> anyhow::Result<()> {
+    ensure_openwakeword_shared_assets(settings, paths).await?;
+
+    if retrain {
+        if training_command_configured(settings) {
+            collect_wakeword_samples(settings, paths).await?;
+            prepare_training_samples(paths).await?;
+            run_training_command(settings, paths).await?;
+        } else {
+            install_openwakeword_stock_head(settings, paths, true).await?;
+        }
+    } else if tokio::fs::metadata(&paths.model_path).await.is_err() {
+        install_openwakeword_stock_head(settings, paths, false).await?;
+    }
+
+    tokio::fs::metadata(&paths.model_path)
+        .await
+        .with_context(|| {
+            format!(
+                "wakeword model is missing at {}",
+                paths.model_path.display()
+            )
+        })?;
+    Ok(())
+}
+
+async fn ensure_legacy_onnx_model(
+    settings: &WakewordSettings,
+    paths: &WakewordPaths,
+    retrain: bool,
+) -> anyhow::Result<()> {
+    if !retrain && tokio::fs::metadata(&paths.model_path).await.is_ok() {
+        return Ok(());
+    }
+
+    collect_wakeword_samples(settings, paths).await?;
+    prepare_training_samples(paths).await?;
+    run_training_command(settings, paths).await?;
 
     tokio::fs::metadata(&paths.model_path)
         .await
@@ -230,8 +664,110 @@ pub async fn ensure_wakeword_model(
                 paths.model_path.display()
             )
         })?;
-    write_metadata(settings, &paths).await?;
-    Ok(paths)
+    Ok(())
+}
+
+async fn ensure_openwakeword_shared_assets(
+    settings: &WakewordSettings,
+    paths: &WakewordPaths,
+) -> anyhow::Result<()> {
+    tokio::fs::create_dir_all(&paths.shared_assets_dir)
+        .await
+        .with_context(|| format!("failed to create {}", paths.shared_assets_dir.display()))?;
+    ensure_openwakeword_asset(
+        settings,
+        OPENWAKEWORD_MELSPECTROGRAM_FILENAME,
+        &paths.melspectrogram_path,
+        false,
+    )
+    .await?;
+    ensure_openwakeword_asset(
+        settings,
+        OPENWAKEWORD_EMBEDDING_FILENAME,
+        &paths.embedding_model_path,
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn install_openwakeword_stock_head(
+    settings: &WakewordSettings,
+    paths: &WakewordPaths,
+    force: bool,
+) -> anyhow::Result<()> {
+    ensure_openwakeword_asset(
+        settings,
+        settings.stock_model.asset_filename(),
+        &paths.model_path,
+        force,
+    )
+    .await
+}
+
+async fn ensure_openwakeword_asset(
+    settings: &WakewordSettings,
+    asset_name: &str,
+    destination: &Path,
+    force: bool,
+) -> anyhow::Result<()> {
+    if !force && tokio::fs::metadata(destination).await.is_ok() {
+        return Ok(());
+    }
+
+    if let Some(parent) = destination.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    if let Some(source_dir) = settings.assets_dir.as_ref() {
+        copy_openwakeword_asset(source_dir, asset_name, destination).await
+    } else {
+        download_openwakeword_asset(asset_name, destination).await
+    }
+}
+
+async fn copy_openwakeword_asset(
+    source_dir: &Path,
+    asset_name: &str,
+    destination: &Path,
+) -> anyhow::Result<()> {
+    let source = source_dir.join(asset_name);
+    tokio::fs::metadata(&source).await.with_context(|| {
+        format!(
+            "openWakeWord asset {} is missing from configured assets_dir {}",
+            asset_name,
+            source_dir.display()
+        )
+    })?;
+    tokio::fs::copy(&source, destination)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to copy openWakeWord asset {} to {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+    Ok(())
+}
+
+async fn download_openwakeword_asset(asset_name: &str, destination: &Path) -> anyhow::Result<()> {
+    let url = format!("{OPENWAKEWORD_RELEASE_BASE_URL}/{asset_name}");
+    let response = reqwest::get(&url)
+        .await
+        .with_context(|| format!("failed to download openWakeWord asset {url}"))?
+        .error_for_status()
+        .with_context(|| format!("openWakeWord asset request failed for {url}"))?;
+    let body = response
+        .bytes()
+        .await
+        .with_context(|| format!("failed to read openWakeWord asset body from {url}"))?;
+    tokio::fs::write(destination, body)
+        .await
+        .with_context(|| format!("failed to write {}", destination.display()))?;
+    Ok(())
 }
 
 pub async fn collect_wakeword_samples(
@@ -300,11 +836,24 @@ pub async fn run_training_command(
         );
     };
 
-    let status = Command::new("sh")
+    let mut child = Command::new("sh");
+    child
         .arg("-c")
         .arg(command)
         .env("SPEACHES_COMPANION_WAKEWORD_NAME", &settings.name)
+        .env(
+            "SPEACHES_COMPANION_WAKEWORD_ENGINE",
+            settings.engine.as_str(),
+        )
+        .env(
+            "SPEACHES_COMPANION_WAKEWORD_STOCK_MODEL",
+            settings.stock_model.as_str(),
+        )
         .env("SPEACHES_COMPANION_WAKEWORD_ROOT", &paths.root)
+        .env(
+            "SPEACHES_COMPANION_WAKEWORD_SHARED_ASSETS_DIR",
+            &paths.shared_assets_dir,
+        )
         .env(
             "SPEACHES_COMPANION_WAKEWORD_SAMPLES_DIR",
             &paths.samples_dir,
@@ -316,10 +865,24 @@ pub async fn run_training_command(
         .env("SPEACHES_COMPANION_WAKEWORD_MODEL", &paths.model_path)
         .env("SPEACHES_COMPANION_WAKEWORD_METADATA", &paths.metadata_path)
         .env(
+            "SPEACHES_COMPANION_WAKEWORD_MELSPEC_MODEL",
+            &paths.melspectrogram_path,
+        )
+        .env(
+            "SPEACHES_COMPANION_WAKEWORD_EMBEDDING_MODEL",
+            &paths.embedding_model_path,
+        )
+        .env(
             "SPEACHES_COMPANION_WAKEWORD_SAMPLE_COUNT",
             settings.sample_count.to_string(),
         )
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+
+    if let Some(source_dir) = settings.assets_dir.as_ref() {
+        child.env("SPEACHES_COMPANION_WAKEWORD_ASSETS_SOURCE_DIR", source_dir);
+    }
+
+    let status = child
         .status()
         .await
         .context("failed to start wakeword training command")?;
@@ -334,8 +897,16 @@ where
     I: TextInjector,
 {
     let paths = ensure_wakeword_model(&config.settings, false).await?;
-    let scorer = OnnxWakeScorer::load(&paths.model_path, config.settings.frame)?;
-    run_wakeword_loop_with_scorer(config, scorer, injector).await
+    match config.settings.engine {
+        WakewordEngine::Onnx => {
+            let scorer = OnnxWakeScorer::load(&paths.model_path, config.settings.frame)?;
+            run_wakeword_loop_with_scorer(config, scorer, injector).await
+        }
+        WakewordEngine::Openwakeword => {
+            let scorer = OpenWakewordPipelineScorer::load(&paths)?;
+            run_wakeword_loop_with_scorer(config, scorer, injector).await
+        }
+    }
 }
 
 pub async fn run_wakeword_loop_with_scorer<S, I>(
@@ -467,15 +1038,72 @@ async fn transcribe_wake_recording(
 async fn write_metadata(settings: &WakewordSettings, paths: &WakewordPaths) -> anyhow::Result<()> {
     let metadata = WakewordMetadata {
         name: settings.name.clone(),
+        engine: settings.engine,
+        stock_model: (settings.engine == WakewordEngine::Openwakeword)
+            .then_some(settings.stock_model),
         threshold: settings.threshold,
         frame_ms: settings.frame.as_millis() as u64,
         sample_count: settings.sample_count,
         model_path: paths.model_path.clone(),
+        shared_assets_dir: (settings.engine == WakewordEngine::Openwakeword)
+            .then_some(paths.shared_assets_dir.clone()),
     };
     let data = serde_json::to_vec_pretty(&metadata)?;
     tokio::fs::write(&paths.metadata_path, data)
         .await
         .with_context(|| format!("failed to write {}", paths.metadata_path.display()))
+}
+
+fn infer_keyword_frames(model: &TypedModel) -> anyhow::Result<usize> {
+    let shape = model
+        .input_fact(0)
+        .context("openWakeWord keyword model has no inputs")?
+        .shape
+        .as_concrete()
+        .context("openWakeWord keyword model requires a concrete input shape")?;
+    if shape.len() != 3 {
+        bail!(
+            "openWakeWord keyword model input rank must be 3, got shape {:?}",
+            shape
+        );
+    }
+    if shape[0] != 1 || shape[2] != OPENWAKEWORD_EMBEDDING_DIM {
+        bail!(
+            "openWakeWord keyword model input must be [1, frames, {}], got {:?}",
+            OPENWAKEWORD_EMBEDDING_DIM,
+            shape
+        );
+    }
+    Ok(shape[1])
+}
+
+fn first_output_as_slice<'a>(outputs: &'a TVec<TValue>, label: &str) -> anyhow::Result<&'a [f32]> {
+    outputs
+        .first()
+        .with_context(|| format!("{label} produced no tensors"))?
+        .try_as_plain()
+        .with_context(|| format!("{label} is not a plain tensor"))?
+        .as_slice::<f32>()
+        .with_context(|| format!("{label} is not f32"))
+}
+
+fn training_command_configured(settings: &WakewordSettings) -> bool {
+    settings
+        .training_command
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn trim_frame_buffer(buffer: &mut Vec<f32>, frame_width: usize, max_frames: usize) {
+    let frames = frame_count(buffer, frame_width);
+    if frames > max_frames {
+        let drop_values = (frames - max_frames) * frame_width;
+        buffer.drain(..drop_values);
+    }
+}
+
+fn frame_count(buffer: &[f32], frame_width: usize) -> usize {
+    buffer.len() / frame_width
 }
 
 fn samples_for_duration(sample_rate: u32, duration: Duration) -> usize {
@@ -512,6 +1140,7 @@ fn unix_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[derive(Debug)]
     struct FakeScorer {
@@ -524,6 +1153,50 @@ mod tests {
                 0.0
             } else {
                 self.scores.remove(0)
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeOpenWakewordBackend {
+        keyword_frames: usize,
+        melspectrogram_calls: Vec<usize>,
+        embedding_calls: usize,
+        keyword_calls: usize,
+        next_keyword_scores: Vec<f32>,
+    }
+
+    impl FakeOpenWakewordBackend {
+        fn new() -> Self {
+            Self {
+                keyword_frames: 16,
+                ..Self::default()
+            }
+        }
+    }
+
+    impl OpenWakewordBackend for FakeOpenWakewordBackend {
+        fn keyword_frames(&self) -> usize {
+            self.keyword_frames
+        }
+
+        fn run_melspectrogram(&mut self, samples: &[i16]) -> anyhow::Result<Vec<f32>> {
+            self.melspectrogram_calls.push(samples.len());
+            let frame_count = samples.len() / 160 - 3;
+            Ok(vec![0.0; frame_count * OPENWAKEWORD_MEL_BINS])
+        }
+
+        fn run_embedding(&mut self, _mel_window: &[f32]) -> anyhow::Result<Vec<f32>> {
+            self.embedding_calls += 1;
+            Ok(vec![0.0; OPENWAKEWORD_EMBEDDING_DIM])
+        }
+
+        fn run_keyword(&mut self, _feature_window: &[f32]) -> anyhow::Result<f32> {
+            self.keyword_calls += 1;
+            Ok(if self.next_keyword_scores.is_empty() {
+                0.0
+            } else {
+                self.next_keyword_scores.remove(0)
             })
         }
     }
@@ -562,9 +1235,12 @@ mod tests {
     }
 
     #[test]
-    fn wakeword_paths_are_under_named_root() {
+    fn wakeword_paths_include_shared_openwakeword_assets() {
         let settings = WakewordSettings {
             name: "default".to_string(),
+            engine: WakewordEngine::Openwakeword,
+            stock_model: DEFAULT_OPENWAKEWORD_STOCK_MODEL,
+            assets_dir: None,
             root_dir: PathBuf::from("/tmp/wakewords"),
             threshold: DEFAULT_WAKEWORD_THRESHOLD,
             frame: Duration::from_millis(DEFAULT_WAKEWORD_FRAME_MS),
@@ -586,5 +1262,143 @@ mod tests {
             paths.preprocessed_dir,
             PathBuf::from("/tmp/wakewords/default/preprocessed")
         );
+        assert_eq!(
+            paths.shared_assets_dir,
+            PathBuf::from("/tmp/wakewords/_openwakeword/v0.5.1")
+        );
+        assert_eq!(
+            paths.melspectrogram_path,
+            PathBuf::from("/tmp/wakewords/_openwakeword/v0.5.1/melspectrogram.onnx")
+        );
+    }
+
+    #[test]
+    fn openwakeword_scorer_accumulates_partial_frames() {
+        let backend = FakeOpenWakewordBackend::new();
+        let mut scorer = OpenWakewordPipelineScorer::with_backend(backend).unwrap();
+        scorer.warmup_windows_remaining = 0;
+
+        assert_eq!(scorer.score(&vec![0; 640]).unwrap(), 0.0);
+        assert_eq!(scorer.backend.keyword_calls, 0);
+
+        scorer.backend.next_keyword_scores = vec![0.6];
+        assert_eq!(scorer.score(&vec![0; 640]).unwrap(), 0.6);
+        assert_eq!(scorer.backend.keyword_calls, 1);
+        assert_eq!(scorer.backend.embedding_calls, 1);
+    }
+
+    #[test]
+    fn openwakeword_scorer_uses_max_score_for_multi_frame_batches() {
+        let backend = FakeOpenWakewordBackend {
+            next_keyword_scores: vec![0.2, 0.8],
+            ..FakeOpenWakewordBackend::new()
+        };
+        let mut scorer = OpenWakewordPipelineScorer::with_backend(backend).unwrap();
+        scorer.warmup_windows_remaining = 0;
+
+        assert_eq!(
+            scorer
+                .score(&vec![0; OPENWAKEWORD_FRAME_SAMPLES * 2])
+                .unwrap(),
+            0.8
+        );
+        assert_eq!(scorer.backend.embedding_calls, 2);
+        assert_eq!(scorer.backend.keyword_calls, 2);
+    }
+
+    #[test]
+    fn openwakeword_scorer_suppresses_warmup_windows() {
+        let backend = FakeOpenWakewordBackend {
+            next_keyword_scores: vec![0.9; 6],
+            ..FakeOpenWakewordBackend::new()
+        };
+        let mut scorer = OpenWakewordPipelineScorer::with_backend(backend).unwrap();
+
+        for _ in 0..OPENWAKEWORD_WARMUP_WINDOWS {
+            assert_eq!(
+                scorer.score(&vec![0; OPENWAKEWORD_FRAME_SAMPLES]).unwrap(),
+                0.0
+            );
+        }
+        assert_eq!(
+            scorer.score(&vec![0; OPENWAKEWORD_FRAME_SAMPLES]).unwrap(),
+            0.9
+        );
+    }
+
+    #[tokio::test]
+    async fn openwakeword_assets_can_be_copied_from_local_dir() {
+        let dir = tempdir().unwrap();
+        let assets_dir = dir.path().join("assets");
+        let root_dir = dir.path().join("wakewords");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        std::fs::write(
+            assets_dir.join(OPENWAKEWORD_MELSPECTROGRAM_FILENAME),
+            b"mel",
+        )
+        .unwrap();
+        std::fs::write(assets_dir.join(OPENWAKEWORD_EMBEDDING_FILENAME), b"embed").unwrap();
+        std::fs::write(
+            assets_dir.join(DEFAULT_OPENWAKEWORD_STOCK_MODEL.asset_filename()),
+            b"head",
+        )
+        .unwrap();
+
+        let settings = WakewordSettings {
+            name: "default".to_string(),
+            engine: WakewordEngine::Openwakeword,
+            stock_model: DEFAULT_OPENWAKEWORD_STOCK_MODEL,
+            assets_dir: Some(assets_dir.clone()),
+            root_dir: root_dir.clone(),
+            threshold: DEFAULT_WAKEWORD_THRESHOLD,
+            frame: Duration::from_millis(DEFAULT_WAKEWORD_FRAME_MS),
+            silence_timeout: Duration::from_millis(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS),
+            sample_count: DEFAULT_WAKEWORD_SAMPLE_COUNT,
+            sample_duration: Duration::from_millis(DEFAULT_WAKEWORD_SAMPLE_DURATION_MS),
+            training_command: None,
+            activation_grace: Duration::from_millis(DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS),
+            max_recording: Duration::from_millis(DEFAULT_WAKEWORD_MAX_RECORDING_MS),
+        };
+
+        let paths = ensure_wakeword_model(&settings, false).await.unwrap();
+
+        assert_eq!(tokio::fs::read(&paths.model_path).await.unwrap(), b"head");
+        assert_eq!(
+            tokio::fs::read(&paths.melspectrogram_path).await.unwrap(),
+            b"mel"
+        );
+        assert_eq!(
+            tokio::fs::read(&paths.embedding_model_path).await.unwrap(),
+            b"embed"
+        );
+        assert!(tokio::fs::metadata(&paths.metadata_path).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn openwakeword_local_assets_are_required_when_assets_dir_is_configured() {
+        let dir = tempdir().unwrap();
+        let assets_dir = dir.path().join("assets");
+        let root_dir = dir.path().join("wakewords");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        std::fs::write(assets_dir.join(OPENWAKEWORD_EMBEDDING_FILENAME), b"embed").unwrap();
+
+        let settings = WakewordSettings {
+            name: "default".to_string(),
+            engine: WakewordEngine::Openwakeword,
+            stock_model: DEFAULT_OPENWAKEWORD_STOCK_MODEL,
+            assets_dir: Some(assets_dir.clone()),
+            root_dir,
+            threshold: DEFAULT_WAKEWORD_THRESHOLD,
+            frame: Duration::from_millis(DEFAULT_WAKEWORD_FRAME_MS),
+            silence_timeout: Duration::from_millis(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS),
+            sample_count: DEFAULT_WAKEWORD_SAMPLE_COUNT,
+            sample_duration: Duration::from_millis(DEFAULT_WAKEWORD_SAMPLE_DURATION_MS),
+            training_command: None,
+            activation_grace: Duration::from_millis(DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS),
+            max_recording: Duration::from_millis(DEFAULT_WAKEWORD_MAX_RECORDING_MS),
+        };
+
+        let error = ensure_wakeword_model(&settings, false).await.unwrap_err();
+        assert!(format!("{error:#}").contains("assets_dir"));
     }
 }

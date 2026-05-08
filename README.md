@@ -78,6 +78,9 @@ preroll_ms = 750
 
 [wakeword]
 # root_dir defaults to $XDG_DATA_HOME/speaches-companion/wakewords
+engine = "openwakeword"
+stock_model = "alexa"
+# assets_dir = "/path/to/predownloaded-openwakeword-assets"
 threshold = 0.5
 frame_ms = 80
 silence_timeout_ms = 900
@@ -189,14 +192,21 @@ nix run . -- wakeword aurgob --retrain
 `wakeword [name]` defaults to `default` and stores artifacts under
 `wakeword.root_dir/<name>/`; unset `root_dir` defaults to
 `$XDG_DATA_HOME/speaches-companion/wakewords` or
-`~/.local/share/speaches-companion/wakewords`. If `model.onnx` is missing, it records
-`sample_count` wake phrase samples, copies them into a preprocessed sample
-directory, and runs `training_command`. The command receives environment
-variables including `SPEACHES_COMPANION_WAKEWORD_SAMPLES_DIR` and
-`SPEACHES_COMPANION_WAKEWORD_MODEL`; it must write the runtime ONNX model to
-that model path. Runtime inference is local Rust ONNX; Speaches STT is only used
-after a wake detection, and dictation stops after `silence_timeout_ms` of
-silence.
+`~/.local/share/speaches-companion/wakewords`. The canonical default engine is
+`openwakeword`: on first run it installs the shared `melspectrogram.onnx` and
+`embedding_model.onnx` assets plus the selected stock keyword head, then runs
+the full wake-word pipeline locally in Rust. Set `assets_dir` to point at
+predownloaded assets instead of downloading them on demand.
+
+`training_command` is now for explicit custom-head refreshes with `--retrain`,
+not for first-run stock setup. The command receives environment variables
+including `SPEACHES_COMPANION_WAKEWORD_SAMPLES_DIR`,
+`SPEACHES_COMPANION_WAKEWORD_MODEL`,
+`SPEACHES_COMPANION_WAKEWORD_MELSPEC_MODEL`, and
+`SPEACHES_COMPANION_WAKEWORD_EMBEDDING_MODEL`; it must write the runtime ONNX
+head to that model path. Use `--engine onnx` only for the legacy single-model
+raw-audio path. Speaches STT is still only used after a wake detection, and
+dictation stops after `silence_timeout_ms` of silence.
 
 Speaches SSE transcription responses can be tested with:
 

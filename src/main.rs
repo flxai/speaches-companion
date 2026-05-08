@@ -27,8 +27,9 @@ use speaches_companion::tts::{
     write_speech_temp_file, SpeechOptions,
 };
 use speaches_companion::wakeword::{
-    default_wakeword_root, ensure_wakeword_model, run_wakeword_loop, WakewordRunConfig,
-    WakewordSettings, DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS, DEFAULT_WAKEWORD_FRAME_MS,
+    default_wakeword_root, ensure_wakeword_model, run_wakeword_loop, OpenWakewordStockModel,
+    WakewordEngine, WakewordRunConfig, WakewordSettings, DEFAULT_OPENWAKEWORD_STOCK_MODEL,
+    DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS, DEFAULT_WAKEWORD_FRAME_MS,
     DEFAULT_WAKEWORD_MAX_RECORDING_MS, DEFAULT_WAKEWORD_NAME, DEFAULT_WAKEWORD_SAMPLE_COUNT,
     DEFAULT_WAKEWORD_SAMPLE_DURATION_MS, DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS,
     DEFAULT_WAKEWORD_THRESHOLD,
@@ -144,6 +145,12 @@ struct WakewordArgs {
     name: String,
     #[arg(long)]
     config: Option<PathBuf>,
+    #[arg(long, value_enum)]
+    engine: Option<WakewordEngine>,
+    #[arg(long, value_enum)]
+    stock_model: Option<OpenWakewordStockModel>,
+    #[arg(long)]
+    assets_dir: Option<PathBuf>,
     #[arg(long)]
     base_url: Option<String>,
     #[arg(long)]
@@ -551,6 +558,18 @@ fn resolve_daemon_settings(args: &DaemonArgs, file_config: &FileConfig) -> Daemo
 fn resolve_wakeword_settings(args: &WakewordArgs, file_config: &FileConfig) -> WakewordSettings {
     WakewordSettings {
         name: args.name.clone(),
+        engine: args
+            .engine
+            .or(file_config.wakeword.engine)
+            .unwrap_or(WakewordEngine::Openwakeword),
+        stock_model: args
+            .stock_model
+            .or(file_config.wakeword.stock_model)
+            .unwrap_or(DEFAULT_OPENWAKEWORD_STOCK_MODEL),
+        assets_dir: args
+            .assets_dir
+            .clone()
+            .or_else(|| file_config.wakeword.assets_dir.clone()),
         root_dir: args
             .root_dir
             .clone()
@@ -1291,6 +1310,9 @@ mod tests {
         let settings = resolve_wakeword_settings(&args, &FileConfig::default());
 
         assert_eq!(settings.name, DEFAULT_WAKEWORD_NAME);
+        assert_eq!(settings.engine, WakewordEngine::Openwakeword);
+        assert_eq!(settings.stock_model, DEFAULT_OPENWAKEWORD_STOCK_MODEL);
+        assert_eq!(settings.assets_dir, None);
         assert_eq!(settings.threshold, DEFAULT_WAKEWORD_THRESHOLD);
         assert_eq!(
             settings.silence_timeout,
@@ -1305,6 +1327,9 @@ mod tests {
         let args = parse_wakeword_args(["speaches-companion", "wakeword", "aurgob"]);
         let file_config = FileConfig {
             wakeword: WakewordFileConfig {
+                engine: Some(WakewordEngine::Onnx),
+                stock_model: Some(OpenWakewordStockModel::Weather),
+                assets_dir: Some(PathBuf::from("/tmp/openwakeword-assets")),
                 root_dir: Some(PathBuf::from("/tmp/wakewords")),
                 threshold: Some(0.72),
                 frame_ms: Some(40),
@@ -1321,6 +1346,12 @@ mod tests {
         let settings = resolve_wakeword_settings(&args, &file_config);
 
         assert_eq!(settings.name, "aurgob");
+        assert_eq!(settings.engine, WakewordEngine::Onnx);
+        assert_eq!(settings.stock_model, OpenWakewordStockModel::Weather);
+        assert_eq!(
+            settings.assets_dir,
+            Some(PathBuf::from("/tmp/openwakeword-assets"))
+        );
         assert_eq!(settings.root_dir, PathBuf::from("/tmp/wakewords"));
         assert_eq!(settings.threshold, 0.72);
         assert_eq!(settings.frame, Duration::from_millis(40));
@@ -1338,6 +1369,12 @@ mod tests {
             "speaches-companion",
             "wakeword",
             "samantha",
+            "--engine",
+            "onnx",
+            "--stock-model",
+            "timer",
+            "--assets-dir",
+            "/tmp/cli-assets",
             "--root-dir",
             "/tmp/cli-wakewords",
             "--threshold",
@@ -1352,6 +1389,9 @@ mod tests {
         ]);
         let file_config = FileConfig {
             wakeword: WakewordFileConfig {
+                engine: Some(WakewordEngine::Openwakeword),
+                stock_model: Some(OpenWakewordStockModel::Alexa),
+                assets_dir: Some(PathBuf::from("/tmp/file-assets")),
                 root_dir: Some(PathBuf::from("/tmp/file-wakewords")),
                 threshold: Some(0.4),
                 sample_count: Some(3),
@@ -1369,6 +1409,9 @@ mod tests {
         let settings = resolve_wakeword_settings(&args, &file_config);
 
         assert_eq!(settings.name, "samantha");
+        assert_eq!(settings.engine, WakewordEngine::Onnx);
+        assert_eq!(settings.stock_model, OpenWakewordStockModel::Timer);
+        assert_eq!(settings.assets_dir, Some(PathBuf::from("/tmp/cli-assets")));
         assert_eq!(settings.root_dir, PathBuf::from("/tmp/cli-wakewords"));
         assert_eq!(settings.threshold, 0.8);
         assert_eq!(settings.sample_count, 10);
