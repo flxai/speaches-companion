@@ -43,7 +43,7 @@
           ];
           postInstall = ''
             wrapProgram "$out/bin/speaches-companion" \
-              --prefix PATH : ${lib.makeBinPath [pkgs.ffmpeg pkgs.pipewire pkgs.sway pkgs.wtype pkgs.xclip]}
+              --prefix PATH : ${lib.makeBinPath [pkgs.ffmpeg pkgs.pipewire pkgs.sway pkgs.wl-clipboard pkgs.wtype pkgs.xclip]}
           '';
         });
 
@@ -167,6 +167,7 @@
           rustc
           rustfmt
           sway
+          wl-clipboard
           wtype
           xclip
           xdotool

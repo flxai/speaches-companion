@@ -3,6 +3,8 @@ use std::io::Write;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{bail, Context};
 use serde_json::Value;
@@ -173,6 +175,8 @@ pub struct SwayTextInjector {
     wayland_display: Option<String>,
     swaymsg_path: PathBuf,
     wtype_path: PathBuf,
+    wl_copy_path: PathBuf,
+    wl_paste_path: PathBuf,
 }
 
 impl SwayTextInjector {
@@ -186,6 +190,8 @@ impl SwayTextInjector {
             wayland_display,
             swaymsg_path: PathBuf::from("swaymsg"),
             wtype_path: PathBuf::from("wtype"),
+            wl_copy_path: PathBuf::from("wl-copy"),
+            wl_paste_path: PathBuf::from("wl-paste"),
         })
     }
 
@@ -197,6 +203,22 @@ impl SwayTextInjector {
 
     fn wtype_command(&self) -> Command {
         let mut command = Command::new(&self.wtype_path);
+        if let Some(wayland_display) = self.wayland_display.as_ref() {
+            command.env("WAYLAND_DISPLAY", wayland_display);
+        }
+        command
+    }
+
+    fn wl_copy_command(&self) -> Command {
+        self.wayland_command(&self.wl_copy_path)
+    }
+
+    fn wl_paste_command(&self) -> Command {
+        self.wayland_command(&self.wl_paste_path)
+    }
+
+    fn wayland_command(&self, path: &Path) -> Command {
+        let mut command = Command::new(path);
         if let Some(wayland_display) = self.wayland_display.as_ref() {
             command.env("WAYLAND_DISPLAY", wayland_display);
         }
@@ -226,30 +248,54 @@ impl SwayTextInjector {
         }
     }
 
+    fn add_wtype_paste_args(&self, command: &mut Command, erase_count: usize) {
+        self.add_wtype_timing_args(command);
+        for _ in 0..erase_count {
+            command.arg("-k").arg("BackSpace");
+        }
+        if self.delay_millis > 0 && erase_count > 0 {
+            command.arg("-s").arg(self.delay_millis.to_string());
+        }
+        command
+            .arg("-M")
+            .arg("ctrl")
+            .arg("-P")
+            .arg("v")
+            .arg("-p")
+            .arg("v")
+            .arg("-m")
+            .arg("ctrl");
+    }
+
     fn run_wtype_with_text(&self, text: &str) -> anyhow::Result<()> {
         if text.is_empty() {
             return Ok(());
         }
 
-        let mut command = self.wtype_command();
-        self.add_wtype_replacement_args(&mut command, 0, true);
-        command.stdin(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("failed to start {}", self.wtype_path.display()))?;
-        let mut stdin = child.stdin.take().context("failed to open wtype stdin")?;
-        stdin
-            .write_all(text.as_bytes())
-            .context("failed to send text to wtype")?;
-        drop(stdin);
-        let status = child.wait().context("failed to wait for wtype")?;
-        if !status.success() {
-            bail!("wtype failed with status {status}");
-        }
-        Ok(())
+        self.run_hybrid_replacement(0, text)
     }
 
-    fn run_wtype_replacement(&self, erase_count: usize, text_suffix: &str) -> anyhow::Result<()> {
+    fn run_hybrid_replacement(&self, erase_count: usize, text_suffix: &str) -> anyhow::Result<()> {
+        if self.should_paste_suffix(text_suffix)? {
+            match self.try_clipboard_replacement(erase_count, text_suffix) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!(
+                        "speaches-companion clipboard text injection failed; falling back to wtype: {error:#}"
+                    );
+                }
+            }
+        }
+
+        self.run_wtype_typed_replacement(erase_count, text_suffix)
+    }
+
+    fn run_wtype_typed_replacement(
+        &self,
+        erase_count: usize,
+        text_suffix: &str,
+    ) -> anyhow::Result<()> {
         if erase_count == 0 && text_suffix.is_empty() {
             return Ok(());
         }
@@ -281,6 +327,155 @@ impl SwayTextInjector {
             bail!("wtype replacement failed with status {status}");
         }
         Ok(())
+    }
+
+    fn try_clipboard_replacement(
+        &self,
+        erase_count: usize,
+        text_suffix: &str,
+    ) -> anyhow::Result<bool> {
+        let snapshot = self.clipboard_snapshot()?;
+        if matches!(snapshot, ClipboardSnapshot::NonText) {
+            return Ok(false);
+        };
+
+        self.copy_text_to_clipboard(text_suffix.as_bytes())?;
+        let paste_result = self.run_wtype_paste(erase_count);
+        self.wait_for_paste_delivery();
+        if let Err(error) = self.restore_clipboard(snapshot) {
+            eprintln!("speaches-companion failed to restore clipboard: {error:#}");
+        }
+        paste_result?;
+        Ok(true)
+    }
+
+    fn should_paste_suffix(&self, text_suffix: &str) -> anyhow::Result<bool> {
+        if text_suffix.is_empty() {
+            return Ok(false);
+        }
+
+        let benefits_from_paste =
+            text_suffix.chars().count() > 4 || text_suffix.chars().any(char::is_whitespace);
+        if !benefits_from_paste {
+            return Ok(false);
+        }
+
+        Ok(!self.focused_target_is_terminal()?)
+    }
+
+    fn focused_target_is_terminal(&self) -> anyhow::Result<bool> {
+        let tree = self.sway_tree()?;
+        let Some(node) = focused_sway_node(&tree) else {
+            return Ok(false);
+        };
+        Ok(sway_node_identity(node).is_some_and(is_terminal_identity))
+    }
+
+    fn sway_tree(&self) -> anyhow::Result<Value> {
+        let output = self
+            .swaymsg_command()
+            .arg("-r")
+            .arg("-t")
+            .arg("get_tree")
+            .output()
+            .context("failed to run swaymsg get_tree")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "swaymsg get_tree failed with status {}: {stderr}",
+                output.status
+            );
+        }
+
+        serde_json::from_slice(&output.stdout).context("failed to parse sway tree JSON")
+    }
+
+    fn run_wtype_paste(&self, erase_count: usize) -> anyhow::Result<()> {
+        let mut command = self.wtype_command();
+        self.add_wtype_paste_args(&mut command, erase_count);
+        let status = command
+            .status()
+            .with_context(|| format!("failed to start {}", self.wtype_path.display()))?;
+        if !status.success() {
+            bail!("wtype paste injection failed with status {status}");
+        }
+        Ok(())
+    }
+
+    fn clipboard_snapshot(&self) -> anyhow::Result<ClipboardSnapshot> {
+        let output = self
+            .wl_paste_command()
+            .args(["--list-types"])
+            .output()
+            .with_context(|| format!("failed to start {}", self.wl_paste_path.display()))?;
+        if !output.status.success() {
+            return Ok(ClipboardSnapshot::Empty);
+        }
+
+        let types = String::from_utf8_lossy(&output.stdout);
+        let mut has_type = false;
+        let mut has_text = false;
+        for mime_type in types.lines() {
+            has_type = true;
+            has_text |= is_text_mime_type(mime_type);
+        }
+        if !has_type {
+            return Ok(ClipboardSnapshot::Empty);
+        }
+        if !has_text {
+            return Ok(ClipboardSnapshot::NonText);
+        }
+
+        let output = self
+            .wl_paste_command()
+            .args(["--no-newline", "--type", "text"])
+            .output()
+            .with_context(|| format!("failed to start {}", self.wl_paste_path.display()))?;
+        if !output.status.success() {
+            return Ok(ClipboardSnapshot::Empty);
+        }
+        Ok(ClipboardSnapshot::Text(output.stdout))
+    }
+
+    fn copy_text_to_clipboard(&self, text: &[u8]) -> anyhow::Result<()> {
+        let mut command = self.wl_copy_command();
+        command.args(["--type", "text/plain"]).stdin(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to start {}", self.wl_copy_path.display()))?;
+        let mut stdin = child.stdin.take().context("failed to open wl-copy stdin")?;
+        stdin
+            .write_all(text)
+            .context("failed to send text to wl-copy")?;
+        drop(stdin);
+        let status = child.wait().context("failed to wait for wl-copy")?;
+        if !status.success() {
+            bail!("wl-copy failed with status {status}");
+        }
+        Ok(())
+    }
+
+    fn restore_clipboard(&self, snapshot: ClipboardSnapshot) -> anyhow::Result<()> {
+        match snapshot {
+            ClipboardSnapshot::Empty => {
+                let status = self
+                    .wl_copy_command()
+                    .arg("--clear")
+                    .status()
+                    .with_context(|| format!("failed to start {}", self.wl_copy_path.display()))?;
+                if !status.success() {
+                    bail!("wl-copy --clear failed with status {status}");
+                }
+            }
+            ClipboardSnapshot::Text(text) => self.copy_text_to_clipboard(&text)?,
+            ClipboardSnapshot::NonText => {}
+        }
+        Ok(())
+    }
+
+    fn wait_for_paste_delivery(&self) {
+        let delay = u64::from(self.delay_millis.max(50));
+        thread::sleep(Duration::from_millis(delay));
     }
 
     fn run_wtype_keys(&self, key: &str, count: usize) -> anyhow::Result<()> {
@@ -315,31 +510,21 @@ impl TextInjector for SwayTextInjector {
     }
 
     fn replace_tail(&self, erase_count: usize, text_suffix: &str) -> anyhow::Result<()> {
-        self.run_wtype_replacement(erase_count, text_suffix)
-            .context("sway/wtype text replacement failed")
+        self.run_hybrid_replacement(erase_count, text_suffix)
+            .context("sway text replacement failed")
     }
 
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
-        let output = self
-            .swaymsg_command()
-            .arg("-r")
-            .arg("-t")
-            .arg("get_tree")
-            .output()
-            .context("failed to run swaymsg get_tree")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "swaymsg get_tree failed with status {}: {stderr}",
-                output.status
-            );
-        }
-
-        let tree: Value =
-            serde_json::from_slice(&output.stdout).context("failed to parse sway tree JSON")?;
+        let tree = self.sway_tree()?;
         let focused_id = focused_sway_node_id(&tree).context("failed to find focused Sway node")?;
         Ok(Some(FocusedWindow(focused_id)))
     }
+}
+
+enum ClipboardSnapshot {
+    Empty,
+    Text(Vec<u8>),
+    NonText,
 }
 
 fn default_sway_socket_path() -> Option<PathBuf> {
@@ -417,12 +602,16 @@ fn newest_socket_matching(
 }
 
 fn focused_sway_node_id(value: &Value) -> Option<u64> {
+    focused_sway_node(value)?.get("id").and_then(Value::as_u64)
+}
+
+fn focused_sway_node(value: &Value) -> Option<&Value> {
     if value
         .get("focused")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return value.get("id").and_then(Value::as_u64);
+        return Some(value);
     }
 
     for child_key in ["nodes", "floating_nodes"] {
@@ -430,13 +619,58 @@ fn focused_sway_node_id(value: &Value) -> Option<u64> {
             continue;
         };
         for child in children {
-            if let Some(id) = focused_sway_node_id(child) {
-                return Some(id);
+            if let Some(node) = focused_sway_node(child) {
+                return Some(node);
             }
         }
     }
 
     None
+}
+
+fn sway_node_identity(value: &Value) -> Option<String> {
+    let app_id = value.get("app_id").and_then(Value::as_str).unwrap_or("");
+    let class = value
+        .get("window_properties")
+        .and_then(|properties| properties.get("class"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let name = value.get("name").and_then(Value::as_str).unwrap_or("");
+    let identity = [app_id, class, name]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\t");
+    if identity.is_empty() {
+        None
+    } else {
+        Some(identity)
+    }
+}
+
+fn is_terminal_identity(identity: String) -> bool {
+    let identity = identity.to_ascii_lowercase();
+    [
+        "alacritty",
+        "foot",
+        "kitty",
+        "wezterm",
+        "wezfurlong",
+        "gnome-terminal",
+        "kgx",
+        "konsole",
+        "xterm",
+    ]
+    .into_iter()
+    .any(|terminal| identity.contains(terminal))
+}
+
+fn is_text_mime_type(mime_type: &str) -> bool {
+    let mime_type = mime_type.trim().to_ascii_lowercase();
+    mime_type == "utf8_string"
+        || mime_type == "string"
+        || mime_type == "text"
+        || mime_type.starts_with("text/")
 }
 
 struct RawXdo {
@@ -876,6 +1110,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sway_paste_command_combines_backspaces_and_paste_shortcut() {
+        let injector = test_sway_injector(20);
+        let mut command = injector.wtype_command();
+
+        injector.add_wtype_paste_args(&mut command, 2);
+
+        assert_eq!(
+            command_args(&command),
+            vec![
+                "-s",
+                "20",
+                "-d",
+                "20",
+                "-k",
+                "BackSpace",
+                "-k",
+                "BackSpace",
+                "-s",
+                "20",
+                "-M",
+                "ctrl",
+                "-P",
+                "v",
+                "-p",
+                "v",
+                "-m",
+                "ctrl"
+            ]
+        );
+    }
+
+    #[test]
+    fn sway_terminal_identity_matches_common_terminal_nodes() {
+        assert!(is_terminal_identity("Alacritty".to_string()));
+        assert!(is_terminal_identity("org.wezfurlong.wezterm".to_string()));
+        assert!(!is_terminal_identity("firefox\tBrowser".to_string()));
+    }
+
+    #[test]
+    fn text_mime_type_matches_wayland_text_offers() {
+        assert!(is_text_mime_type("text/plain;charset=utf-8"));
+        assert!(is_text_mime_type("UTF8_STRING"));
+        assert!(!is_text_mime_type("image/png"));
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum InjectOperation {
         Type(String),
@@ -921,6 +1201,8 @@ mod tests {
             wayland_display: None,
             swaymsg_path: PathBuf::from("swaymsg"),
             wtype_path: PathBuf::from("wtype"),
+            wl_copy_path: PathBuf::from("wl-copy"),
+            wl_paste_path: PathBuf::from("wl-paste"),
         }
     }
 

@@ -109,9 +109,12 @@ recording starts, treat the listening marker as the ready-to-speak signal.
 Text payloads are injected through Sway/wtype when a Sway IPC socket is
 available, otherwise through libxdo text entry with active modifiers temporarily
 cleared. Speculative replacement uses Backspace for the portion that changed.
-Some browser text fields drop characters when virtual keyboard events arrive
-too quickly; set `inject_delay_microsecs` or pass `--inject-delay-microsecs` to
-add a per-key delay.
+On Sway, larger suffixes and suffixes containing whitespace are pasted as a
+single temporary clipboard chunk outside terminal windows; small suffixes still
+use virtual key typing. Some browser text fields drop characters when virtual
+keyboard events arrive too quickly; set `inject_delay_microsecs` or pass
+`--inject-delay-microsecs` to add a per-key delay and a short pre-injection
+settle delay.
 
 Inline partial injection is enabled by default. If the trigger binding keeps a
 modifier physically held while dictating, such as some i3 `$sup+d` bindings,
@@ -183,7 +186,7 @@ silent audio buffer, commits it, and waits for a transcription completion event.
 
 `speaches-companion` links to `libxdo`. On NixOS, plain `cargo run --` works when
 `xdotool` is installed in the current system profile; Sway injection also needs
-`swaymsg` and `wtype` in `PATH`. For a fully provisioned development
+`swaymsg`, `wl-copy`, `wl-paste`, and `wtype` in `PATH`. For a fully provisioned development
 environment, use the Nix shell:
 
 ```sh
