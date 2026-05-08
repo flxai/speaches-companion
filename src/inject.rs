@@ -203,16 +203,36 @@ impl SwayTextInjector {
         command
     }
 
+    fn add_wtype_timing_args(&self, command: &mut Command) {
+        if self.delay_millis > 0 {
+            let delay = self.delay_millis.to_string();
+            command.arg("-s").arg(&delay);
+            command.arg("-d").arg(delay);
+        }
+    }
+
+    fn add_wtype_replacement_args(
+        &self,
+        command: &mut Command,
+        erase_count: usize,
+        has_text_suffix: bool,
+    ) {
+        self.add_wtype_timing_args(command);
+        for _ in 0..erase_count {
+            command.arg("-k").arg("BackSpace");
+        }
+        if has_text_suffix {
+            command.arg("-");
+        }
+    }
+
     fn run_wtype_with_text(&self, text: &str) -> anyhow::Result<()> {
         if text.is_empty() {
             return Ok(());
         }
 
         let mut command = self.wtype_command();
-        if self.delay_millis > 0 {
-            command.arg("-d").arg(self.delay_millis.to_string());
-        }
-        command.arg("-");
+        self.add_wtype_replacement_args(&mut command, 0, true);
         command.stdin(Stdio::piped());
         let mut child = command
             .spawn()
@@ -229,15 +249,47 @@ impl SwayTextInjector {
         Ok(())
     }
 
+    fn run_wtype_replacement(&self, erase_count: usize, text_suffix: &str) -> anyhow::Result<()> {
+        if erase_count == 0 && text_suffix.is_empty() {
+            return Ok(());
+        }
+
+        let mut command = self.wtype_command();
+        self.add_wtype_replacement_args(&mut command, erase_count, !text_suffix.is_empty());
+
+        if text_suffix.is_empty() {
+            let status = command
+                .status()
+                .with_context(|| format!("failed to start {}", self.wtype_path.display()))?;
+            if !status.success() {
+                bail!("wtype replacement failed with status {status}");
+            }
+            return Ok(());
+        }
+
+        command.stdin(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to start {}", self.wtype_path.display()))?;
+        let mut stdin = child.stdin.take().context("failed to open wtype stdin")?;
+        stdin
+            .write_all(text_suffix.as_bytes())
+            .context("failed to send text to wtype")?;
+        drop(stdin);
+        let status = child.wait().context("failed to wait for wtype")?;
+        if !status.success() {
+            bail!("wtype replacement failed with status {status}");
+        }
+        Ok(())
+    }
+
     fn run_wtype_keys(&self, key: &str, count: usize) -> anyhow::Result<()> {
         if count == 0 {
             return Ok(());
         }
 
         let mut command = self.wtype_command();
-        if self.delay_millis > 0 {
-            command.arg("-d").arg(self.delay_millis.to_string());
-        }
+        self.add_wtype_timing_args(&mut command);
         for _ in 0..count {
             command.arg("-k").arg(key);
         }
@@ -260,6 +312,11 @@ impl TextInjector for SwayTextInjector {
     fn erase_chars(&self, count: usize) -> anyhow::Result<()> {
         self.run_wtype_keys("BackSpace", count)
             .context("sway/wtype text erasure failed")
+    }
+
+    fn replace_tail(&self, erase_count: usize, text_suffix: &str) -> anyhow::Result<()> {
+        self.run_wtype_replacement(erase_count, text_suffix)
+            .context("sway/wtype text replacement failed")
     }
 
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
@@ -776,6 +833,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sway_text_command_uses_delay_as_initial_settle_and_key_delay() {
+        let injector = test_sway_injector(20);
+        let mut command = injector.wtype_command();
+
+        injector.add_wtype_replacement_args(&mut command, 0, true);
+
+        assert_eq!(command_args(&command), vec!["-s", "20", "-d", "20", "-"]);
+    }
+
+    #[test]
+    fn sway_text_command_omits_timing_args_without_delay() {
+        let injector = test_sway_injector(0);
+        let mut command = injector.wtype_command();
+
+        injector.add_wtype_replacement_args(&mut command, 0, true);
+
+        assert_eq!(command_args(&command), vec!["-"]);
+    }
+
+    #[test]
+    fn sway_replacement_command_combines_backspaces_and_text() {
+        let injector = test_sway_injector(20);
+        let mut command = injector.wtype_command();
+
+        injector.add_wtype_replacement_args(&mut command, 2, true);
+
+        assert_eq!(
+            command_args(&command),
+            vec![
+                "-s",
+                "20",
+                "-d",
+                "20",
+                "-k",
+                "BackSpace",
+                "-k",
+                "BackSpace",
+                "-"
+            ]
+        );
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum InjectOperation {
         Type(String),
@@ -812,6 +912,23 @@ mod tests {
     #[derive(Clone, Default)]
     struct TailReplacingInjector {
         replacements: Arc<Mutex<Vec<(usize, String)>>>,
+    }
+
+    fn test_sway_injector(delay_millis: u32) -> SwayTextInjector {
+        SwayTextInjector {
+            delay_millis,
+            sway_socket: PathBuf::from("/run/user/1001/sway-ipc.1001.42.sock"),
+            wayland_display: None,
+            swaymsg_path: PathBuf::from("swaymsg"),
+            wtype_path: PathBuf::from("wtype"),
+        }
+    }
+
+    fn command_args(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
     }
 
     impl TextInjector for TailReplacingInjector {
