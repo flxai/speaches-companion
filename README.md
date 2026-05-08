@@ -84,9 +84,6 @@ stock_model = "alexa"
 threshold = 0.5
 frame_ms = 80
 silence_timeout_ms = 900
-sample_count = 10
-sample_duration_ms = 1500
-training_command = "openwakeword-train"
 activation_grace_ms = 5000
 max_recording_ms = 30000
 ```
@@ -181,12 +178,14 @@ nix run . -- daemon --record-dir target/speaches-companion-recordings
 Plain Cargo builds keep `--record-dir` unavailable unless compiled with
 `--features debug-recordings`.
 
-Wake-word dictation runs separately from the hotkey daemon:
+Wake-word dictation runs separately from the hotkey daemon. The canonical flake
+entrypoint is `.#wakeword`, which already references predownloaded stock
+openWakeWord ONNX assets:
 
 ```sh
-nix run . -- wakeword
-nix run . -- wakeword samantha --threshold 0.7
-nix run . -- wakeword aurgob --retrain
+nix run .#wakeword
+nix run .#wakeword -- --stock-model weather
+nix run . -- wakeword --assets-dir "$(nix build .#openwakeword-assets --print-out-paths)"
 ```
 
 `wakeword [name]` defaults to `default` and stores artifacts under
@@ -196,17 +195,18 @@ nix run . -- wakeword aurgob --retrain
 `openwakeword`: on first run it installs the shared `melspectrogram.onnx` and
 `embedding_model.onnx` assets plus the selected stock keyword head, then runs
 the full wake-word pipeline locally in Rust. Set `assets_dir` to point at
-predownloaded assets instead of downloading them on demand.
+predownloaded assets instead of downloading them on demand. The flake also
+exposes `.#openwakeword-assets` for prefetching those stock ONNX files
+explicitly.
 
-`training_command` is now for explicit custom-head refreshes with `--retrain`,
-not for first-run stock setup. The command receives environment variables
-including `SPEACHES_COMPANION_WAKEWORD_SAMPLES_DIR`,
-`SPEACHES_COMPANION_WAKEWORD_MODEL`,
-`SPEACHES_COMPANION_WAKEWORD_MELSPEC_MODEL`, and
-`SPEACHES_COMPANION_WAKEWORD_EMBEDDING_MODEL`; it must write the runtime ONNX
-head to that model path. Use `--engine onnx` only for the legacy single-model
-raw-audio path. Speaches STT is still only used after a wake detection, and
-dictation stops after `silence_timeout_ms` of silence.
+Custom wake-word training is intentionally not integrated here. If you want
+your own ONNX model, use the Python tooling from the upstream
+[openWakeWord](https://github.com/dscripka/openWakeWord) repository, then place
+the resulting file at `wakeword.root_dir/<name>/model.onnx`. For a standalone
+raw-audio model, run with `--engine onnx`; for a custom openWakeWord keyword
+head, keep the default `openwakeword` engine and replace only `model.onnx`.
+Speaches STT is still only used after a wake detection, and dictation stops
+after `silence_timeout_ms` of silence.
 
 Speaches SSE transcription responses can be tested with:
 

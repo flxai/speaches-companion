@@ -1,21 +1,17 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 use tokio::time::{sleep, Instant};
 use tract_onnx::prelude::*;
 
 use crate::audio::{
-    pcm_bytes_for_duration, record_wav_with_pw_record, snapshot_streaming_pcm,
-    start_streaming_pcm_capture, write_pcm_wav, SharedPcmBuffer, StreamingPcmCapture,
-    StreamingPcmSession, STT_SAMPLE_RATE,
+    pcm_bytes_for_duration, snapshot_streaming_pcm, start_streaming_pcm_capture, write_pcm_wav,
+    SharedPcmBuffer, StreamingPcmCapture, StreamingPcmSession, STT_SAMPLE_RATE,
 };
 use crate::inject::{format_transcript_for_injection, TextInjector};
 use crate::stt::{transcribe_file, TranscribeOptions};
@@ -23,8 +19,6 @@ use crate::stt::{transcribe_file, TranscribeOptions};
 pub const DEFAULT_WAKEWORD_NAME: &str = "default";
 pub const DEFAULT_WAKEWORD_THRESHOLD: f32 = 0.5;
 pub const DEFAULT_WAKEWORD_FRAME_MS: u64 = 80;
-pub const DEFAULT_WAKEWORD_SAMPLE_COUNT: usize = 10;
-pub const DEFAULT_WAKEWORD_SAMPLE_DURATION_MS: u64 = 1_500;
 pub const DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS: u64 = 900;
 pub const DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS: u64 = 5_000;
 pub const DEFAULT_WAKEWORD_MAX_RECORDING_MS: u64 = 30_000;
@@ -57,39 +51,19 @@ pub enum WakewordEngine {
     Onnx,
 }
 
-impl WakewordEngine {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Openwakeword => "openwakeword",
-            Self::Onnx => "onnx",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum OpenWakewordStockModel {
     #[default]
     Alexa,
-    HeyMarvin,
     Timer,
     Weather,
 }
 
 impl OpenWakewordStockModel {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Alexa => "alexa",
-            Self::HeyMarvin => "hey-marvin",
-            Self::Timer => "timer",
-            Self::Weather => "weather",
-        }
-    }
-
     fn asset_filename(self) -> &'static str {
         match self {
             Self::Alexa => "alexa_v0.1.onnx",
-            Self::HeyMarvin => "hey_marvin_v0.1.onnx",
             Self::Timer => "timer_v0.1.onnx",
             Self::Weather => "weather_v0.1.onnx",
         }
@@ -106,9 +80,6 @@ pub struct WakewordSettings {
     pub threshold: f32,
     pub frame: Duration,
     pub silence_timeout: Duration,
-    pub sample_count: usize,
-    pub sample_duration: Duration,
-    pub training_command: Option<String>,
     pub activation_grace: Duration,
     pub max_recording: Duration,
 }
@@ -116,8 +87,6 @@ pub struct WakewordSettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WakewordPaths {
     pub root: PathBuf,
-    pub samples_dir: PathBuf,
-    pub preprocessed_dir: PathBuf,
     pub model_path: PathBuf,
     pub metadata_path: PathBuf,
     pub shared_assets_dir: PathBuf,
@@ -145,7 +114,6 @@ struct WakewordMetadata {
     stock_model: Option<OpenWakewordStockModel>,
     threshold: f32,
     frame_ms: u64,
-    sample_count: usize,
     model_path: PathBuf,
     shared_assets_dir: Option<PathBuf>,
 }
@@ -582,8 +550,6 @@ pub fn wakeword_paths(settings: &WakewordSettings) -> anyhow::Result<WakewordPat
         .join(OPENWAKEWORD_CACHE_DIR)
         .join(OPENWAKEWORD_RELEASE_VERSION);
     Ok(WakewordPaths {
-        samples_dir: root.join("samples"),
-        preprocessed_dir: root.join("preprocessed"),
         model_path: root.join("model.onnx"),
         metadata_path: root.join("metadata.json"),
         melspectrogram_path: shared_assets_dir.join(OPENWAKEWORD_MELSPECTROGRAM_FILENAME),
@@ -593,20 +559,15 @@ pub fn wakeword_paths(settings: &WakewordSettings) -> anyhow::Result<WakewordPat
     })
 }
 
-pub async fn ensure_wakeword_model(
-    settings: &WakewordSettings,
-    retrain: bool,
-) -> anyhow::Result<WakewordPaths> {
+pub async fn ensure_wakeword_model(settings: &WakewordSettings) -> anyhow::Result<WakewordPaths> {
     let paths = wakeword_paths(settings)?;
     tokio::fs::create_dir_all(&paths.root)
         .await
         .with_context(|| format!("failed to create {}", paths.root.display()))?;
 
     match settings.engine {
-        WakewordEngine::Openwakeword => {
-            ensure_openwakeword_model(settings, &paths, retrain).await?
-        }
-        WakewordEngine::Onnx => ensure_legacy_onnx_model(settings, &paths, retrain).await?,
+        WakewordEngine::Openwakeword => ensure_openwakeword_model(settings, &paths).await?,
+        WakewordEngine::Onnx => ensure_legacy_onnx_model(&paths).await?,
     }
 
     write_metadata(settings, &paths).await?;
@@ -616,19 +577,9 @@ pub async fn ensure_wakeword_model(
 async fn ensure_openwakeword_model(
     settings: &WakewordSettings,
     paths: &WakewordPaths,
-    retrain: bool,
 ) -> anyhow::Result<()> {
     ensure_openwakeword_shared_assets(settings, paths).await?;
-
-    if retrain {
-        if training_command_configured(settings) {
-            collect_wakeword_samples(settings, paths).await?;
-            prepare_training_samples(paths).await?;
-            run_training_command(settings, paths).await?;
-        } else {
-            install_openwakeword_stock_head(settings, paths, true).await?;
-        }
-    } else if tokio::fs::metadata(&paths.model_path).await.is_err() {
+    if tokio::fs::metadata(&paths.model_path).await.is_err() {
         install_openwakeword_stock_head(settings, paths, false).await?;
     }
 
@@ -643,28 +594,15 @@ async fn ensure_openwakeword_model(
     Ok(())
 }
 
-async fn ensure_legacy_onnx_model(
-    settings: &WakewordSettings,
-    paths: &WakewordPaths,
-    retrain: bool,
-) -> anyhow::Result<()> {
-    if !retrain && tokio::fs::metadata(&paths.model_path).await.is_ok() {
+async fn ensure_legacy_onnx_model(paths: &WakewordPaths) -> anyhow::Result<()> {
+    if tokio::fs::metadata(&paths.model_path).await.is_ok() {
         return Ok(());
     }
 
-    collect_wakeword_samples(settings, paths).await?;
-    prepare_training_samples(paths).await?;
-    run_training_command(settings, paths).await?;
-
-    tokio::fs::metadata(&paths.model_path)
-        .await
-        .with_context(|| {
-            format!(
-                "wakeword training did not create expected ONNX model {}",
-                paths.model_path.display()
-            )
-        })?;
-    Ok(())
+    bail!(
+        "wakeword model {} is missing; provide your own ONNX file at that path or switch back to the default openwakeword engine",
+        paths.model_path.display()
+    );
 }
 
 async fn ensure_openwakeword_shared_assets(
@@ -770,133 +708,11 @@ async fn download_openwakeword_asset(asset_name: &str, destination: &Path) -> an
     Ok(())
 }
 
-pub async fn collect_wakeword_samples(
-    settings: &WakewordSettings,
-    paths: &WakewordPaths,
-) -> anyhow::Result<()> {
-    tokio::fs::create_dir_all(&paths.samples_dir)
-        .await
-        .with_context(|| format!("failed to create {}", paths.samples_dir.display()))?;
-
-    for index in 1..=settings.sample_count {
-        let sample_path = paths.samples_dir.join(format!("sample-{index:02}.wav"));
-        if tokio::fs::metadata(&sample_path).await.is_ok() {
-            continue;
-        }
-        eprintln!(
-            "speaches-companion wakeword '{}': recording sample {index}/{} to {}",
-            settings.name,
-            settings.sample_count,
-            sample_path.display()
-        );
-        sleep(Duration::from_millis(750)).await;
-        record_wav_with_pw_record(&sample_path, settings.sample_duration, STT_SAMPLE_RATE).await?;
-    }
-    Ok(())
-}
-
-pub async fn prepare_training_samples(paths: &WakewordPaths) -> anyhow::Result<()> {
-    tokio::fs::create_dir_all(&paths.preprocessed_dir)
-        .await
-        .with_context(|| format!("failed to create {}", paths.preprocessed_dir.display()))?;
-    let mut entries = tokio::fs::read_dir(&paths.samples_dir)
-        .await
-        .with_context(|| format!("failed to read {}", paths.samples_dir.display()))?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.extension() != Some(OsStr::new("wav")) {
-            continue;
-        }
-        let target = paths
-            .preprocessed_dir
-            .join(path.file_name().context("sample path has no file name")?);
-        tokio::fs::copy(&path, &target).await.with_context(|| {
-            format!(
-                "failed to copy wakeword sample {} to {}",
-                path.display(),
-                target.display()
-            )
-        })?;
-    }
-    Ok(())
-}
-
-pub async fn run_training_command(
-    settings: &WakewordSettings,
-    paths: &WakewordPaths,
-) -> anyhow::Result<()> {
-    let Some(command) = settings
-        .training_command
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        bail!(
-            "wakeword model {} is missing and no training command is configured",
-            paths.model_path.display()
-        );
-    };
-
-    let mut child = Command::new("sh");
-    child
-        .arg("-c")
-        .arg(command)
-        .env("SPEACHES_COMPANION_WAKEWORD_NAME", &settings.name)
-        .env(
-            "SPEACHES_COMPANION_WAKEWORD_ENGINE",
-            settings.engine.as_str(),
-        )
-        .env(
-            "SPEACHES_COMPANION_WAKEWORD_STOCK_MODEL",
-            settings.stock_model.as_str(),
-        )
-        .env("SPEACHES_COMPANION_WAKEWORD_ROOT", &paths.root)
-        .env(
-            "SPEACHES_COMPANION_WAKEWORD_SHARED_ASSETS_DIR",
-            &paths.shared_assets_dir,
-        )
-        .env(
-            "SPEACHES_COMPANION_WAKEWORD_SAMPLES_DIR",
-            &paths.samples_dir,
-        )
-        .env(
-            "SPEACHES_COMPANION_WAKEWORD_PREPROCESSED_DIR",
-            &paths.preprocessed_dir,
-        )
-        .env("SPEACHES_COMPANION_WAKEWORD_MODEL", &paths.model_path)
-        .env("SPEACHES_COMPANION_WAKEWORD_METADATA", &paths.metadata_path)
-        .env(
-            "SPEACHES_COMPANION_WAKEWORD_MELSPEC_MODEL",
-            &paths.melspectrogram_path,
-        )
-        .env(
-            "SPEACHES_COMPANION_WAKEWORD_EMBEDDING_MODEL",
-            &paths.embedding_model_path,
-        )
-        .env(
-            "SPEACHES_COMPANION_WAKEWORD_SAMPLE_COUNT",
-            settings.sample_count.to_string(),
-        )
-        .stdin(Stdio::null());
-
-    if let Some(source_dir) = settings.assets_dir.as_ref() {
-        child.env("SPEACHES_COMPANION_WAKEWORD_ASSETS_SOURCE_DIR", source_dir);
-    }
-
-    let status = child
-        .status()
-        .await
-        .context("failed to start wakeword training command")?;
-    if !status.success() {
-        bail!("wakeword training command failed with {status}");
-    }
-    Ok(())
-}
-
 pub async fn run_wakeword_loop<I>(config: WakewordRunConfig, injector: I) -> anyhow::Result<()>
 where
     I: TextInjector,
 {
-    let paths = ensure_wakeword_model(&config.settings, false).await?;
+    let paths = ensure_wakeword_model(&config.settings).await?;
     match config.settings.engine {
         WakewordEngine::Onnx => {
             let scorer = OnnxWakeScorer::load(&paths.model_path, config.settings.frame)?;
@@ -1043,7 +859,6 @@ async fn write_metadata(settings: &WakewordSettings, paths: &WakewordPaths) -> a
             .then_some(settings.stock_model),
         threshold: settings.threshold,
         frame_ms: settings.frame.as_millis() as u64,
-        sample_count: settings.sample_count,
         model_path: paths.model_path.clone(),
         shared_assets_dir: (settings.engine == WakewordEngine::Openwakeword)
             .then_some(paths.shared_assets_dir.clone()),
@@ -1085,13 +900,6 @@ fn first_output_as_slice<'a>(outputs: &'a TVec<TValue>, label: &str) -> anyhow::
         .with_context(|| format!("{label} is not a plain tensor"))?
         .as_slice::<f32>()
         .with_context(|| format!("{label} is not f32"))
-}
-
-fn training_command_configured(settings: &WakewordSettings) -> bool {
-    settings
-        .training_command
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn trim_frame_buffer(buffer: &mut Vec<f32>, frame_width: usize, max_frames: usize) {
@@ -1245,9 +1053,6 @@ mod tests {
             threshold: DEFAULT_WAKEWORD_THRESHOLD,
             frame: Duration::from_millis(DEFAULT_WAKEWORD_FRAME_MS),
             silence_timeout: Duration::from_millis(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS),
-            sample_count: DEFAULT_WAKEWORD_SAMPLE_COUNT,
-            sample_duration: Duration::from_millis(DEFAULT_WAKEWORD_SAMPLE_DURATION_MS),
-            training_command: None,
             activation_grace: Duration::from_millis(DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS),
             max_recording: Duration::from_millis(DEFAULT_WAKEWORD_MAX_RECORDING_MS),
         };
@@ -1257,10 +1062,6 @@ mod tests {
         assert_eq!(
             paths.model_path,
             PathBuf::from("/tmp/wakewords/default/model.onnx")
-        );
-        assert_eq!(
-            paths.preprocessed_dir,
-            PathBuf::from("/tmp/wakewords/default/preprocessed")
         );
         assert_eq!(
             paths.shared_assets_dir,
@@ -1353,14 +1154,11 @@ mod tests {
             threshold: DEFAULT_WAKEWORD_THRESHOLD,
             frame: Duration::from_millis(DEFAULT_WAKEWORD_FRAME_MS),
             silence_timeout: Duration::from_millis(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS),
-            sample_count: DEFAULT_WAKEWORD_SAMPLE_COUNT,
-            sample_duration: Duration::from_millis(DEFAULT_WAKEWORD_SAMPLE_DURATION_MS),
-            training_command: None,
             activation_grace: Duration::from_millis(DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS),
             max_recording: Duration::from_millis(DEFAULT_WAKEWORD_MAX_RECORDING_MS),
         };
 
-        let paths = ensure_wakeword_model(&settings, false).await.unwrap();
+        let paths = ensure_wakeword_model(&settings).await.unwrap();
 
         assert_eq!(tokio::fs::read(&paths.model_path).await.unwrap(), b"head");
         assert_eq!(
@@ -1391,14 +1189,11 @@ mod tests {
             threshold: DEFAULT_WAKEWORD_THRESHOLD,
             frame: Duration::from_millis(DEFAULT_WAKEWORD_FRAME_MS),
             silence_timeout: Duration::from_millis(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS),
-            sample_count: DEFAULT_WAKEWORD_SAMPLE_COUNT,
-            sample_duration: Duration::from_millis(DEFAULT_WAKEWORD_SAMPLE_DURATION_MS),
-            training_command: None,
             activation_grace: Duration::from_millis(DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS),
             max_recording: Duration::from_millis(DEFAULT_WAKEWORD_MAX_RECORDING_MS),
         };
 
-        let error = ensure_wakeword_model(&settings, false).await.unwrap_err();
+        let error = ensure_wakeword_model(&settings).await.unwrap_err();
         assert!(format!("{error:#}").contains("assets_dir"));
     }
 }

@@ -15,6 +15,34 @@
     forSystem = system: let
       pkgs = nixpkgs.legacyPackages.${system};
       lib = pkgs.lib;
+      fetchOpenWakewordAsset = name: hash:
+        pkgs.fetchurl {
+          url = "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/${name}";
+          inherit hash;
+        };
+
+      openWakewordAssets = pkgs.linkFarm "speaches-companion-openwakeword-assets" [
+        {
+          name = "melspectrogram.onnx";
+          path = fetchOpenWakewordAsset "melspectrogram.onnx" "sha256-uisOD4t7h1NposicsTNg/1O6xDbyiVzO2fR5+mXrF28=";
+        }
+        {
+          name = "embedding_model.onnx";
+          path = fetchOpenWakewordAsset "embedding_model.onnx" "sha256-cNFkKQwdCV0dTuFJvF4AVDJQpzFrWfMdBWz/e9MHXB8=";
+        }
+        {
+          name = "alexa_v0.1.onnx";
+          path = fetchOpenWakewordAsset "alexa_v0.1.onnx" "sha256-b/VmoB0SZw6NnjxZ2jJlHbFXXRcnKmAbf4o5KD37rj4=";
+        }
+        {
+          name = "timer_v0.1.onnx";
+          path = fetchOpenWakewordAsset "timer_v0.1.onnx" "sha256-Nx5EU1RwopJIs7jxu7uvJSXIZBf9j3XGf88CrguWJt8=";
+        }
+        {
+          name = "weather_v0.1.onnx";
+          path = fetchOpenWakewordAsset "weather_v0.1.onnx" "sha256-hEHajnRomejZaVKNW61WUc3VYwecBZYniPd3UwQfYOc=";
+        }
+      ];
 
       commonArgs = {
         pname = "speaches-companion";
@@ -107,11 +135,11 @@
           '';
         });
 
-      mkSubcommandApp = subcommand: description: let
+      mkSubcommandApp = subcommand: description: extraArgs: let
         app = pkgs.writeShellApplication {
           name = "speaches-companion-${subcommand}";
           text = ''
-            exec ${speachesCompanion}/bin/speaches-companion ${subcommand} "$@"
+            exec ${speachesCompanion}/bin/speaches-companion ${subcommand} ${lib.escapeShellArgs extraArgs} "$@"
           '';
         };
       in {
@@ -123,6 +151,7 @@
       packages = {
         default = speachesCompanion;
         speaches-companion = speachesCompanion;
+        openwakeword-assets = openWakewordAssets;
       };
 
       checks = {
@@ -143,15 +172,22 @@
           program = "${speachesCompanion}/bin/speaches-companion";
           meta.description = "Run speaches-companion";
         };
-        daemon = mkSubcommandApp "daemon" "Run the speaches-companion hotkey daemon";
-        "dictate-live" = mkSubcommandApp "dictate-live" "Run realtime dictation";
-        hotkey = mkSubcommandApp "hotkey" "Send a hotkey IPC command";
-        inject = mkSubcommandApp "inject" "Type text into the focused desktop window";
-        "read-aloud" = mkSubcommandApp "read-aloud" "Read selected text aloud through Speaches TTS";
-        "realtime-check" = mkSubcommandApp "realtime-check" "Check Speaches realtime WebSocket readiness";
-        smoke = mkSubcommandApp "smoke" "Run a microphone and STT smoke test";
-        transcribe = mkSubcommandApp "transcribe" "Transcribe an audio file";
-        wakeword = mkSubcommandApp "wakeword" "Run hands-free wake-word dictation";
+        daemon = mkSubcommandApp "daemon" "Run the speaches-companion hotkey daemon" [];
+        "dictate-live" = mkSubcommandApp "dictate-live" "Run realtime dictation" [];
+        hotkey = mkSubcommandApp "hotkey" "Send a hotkey IPC command" [];
+        inject = mkSubcommandApp "inject" "Type text into the focused desktop window" [];
+        "read-aloud" = mkSubcommandApp "read-aloud" "Read selected text aloud through Speaches TTS" [];
+        "realtime-check" = mkSubcommandApp "realtime-check" "Check Speaches realtime WebSocket readiness" [];
+        smoke = mkSubcommandApp "smoke" "Run a microphone and STT smoke test" [];
+        transcribe = mkSubcommandApp "transcribe" "Transcribe an audio file" [];
+        wakeword =
+          mkSubcommandApp
+          "wakeword"
+          "Run hands-free wake-word dictation"
+          [
+            "--assets-dir"
+            "${openWakewordAssets}"
+          ];
       };
 
       devShells.default = pkgs.mkShell {

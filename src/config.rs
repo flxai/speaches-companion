@@ -82,9 +82,6 @@ pub struct WakewordFileConfig {
     pub threshold: Option<f32>,
     pub frame_ms: Option<u64>,
     pub silence_timeout_ms: Option<u64>,
-    pub sample_count: Option<usize>,
-    pub sample_duration_ms: Option<u64>,
-    pub training_command: Option<String>,
     pub activation_grace_ms: Option<u64>,
     pub max_recording_ms: Option<u64>,
 }

@@ -193,9 +193,6 @@ root_dir = "wakewords"
 threshold = 0.7
 frame_ms = 80
 silence_timeout_ms = 900
-sample_count = 10
-sample_duration_ms = 1500
-training_command = "train-wakeword"
 activation_grace_ms = 5000
 max_recording_ms = 30000
 "#,
@@ -248,12 +245,6 @@ max_recording_ms = 30000
     assert_eq!(config.wakeword.threshold, Some(0.7));
     assert_eq!(config.wakeword.frame_ms, Some(80));
     assert_eq!(config.wakeword.silence_timeout_ms, Some(900));
-    assert_eq!(config.wakeword.sample_count, Some(10));
-    assert_eq!(config.wakeword.sample_duration_ms, Some(1500));
-    assert_eq!(
-        config.wakeword.training_command.as_deref(),
-        Some("train-wakeword")
-    );
     assert_eq!(config.wakeword.activation_grace_ms, Some(5000));
     assert_eq!(config.wakeword.max_recording_ms, Some(30000));
 }

@@ -27,11 +27,10 @@ use speaches_companion::tts::{
     write_speech_temp_file, SpeechOptions,
 };
 use speaches_companion::wakeword::{
-    default_wakeword_root, ensure_wakeword_model, run_wakeword_loop, OpenWakewordStockModel,
-    WakewordEngine, WakewordRunConfig, WakewordSettings, DEFAULT_OPENWAKEWORD_STOCK_MODEL,
+    default_wakeword_root, run_wakeword_loop, OpenWakewordStockModel, WakewordEngine,
+    WakewordRunConfig, WakewordSettings, DEFAULT_OPENWAKEWORD_STOCK_MODEL,
     DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS, DEFAULT_WAKEWORD_FRAME_MS,
-    DEFAULT_WAKEWORD_MAX_RECORDING_MS, DEFAULT_WAKEWORD_NAME, DEFAULT_WAKEWORD_SAMPLE_COUNT,
-    DEFAULT_WAKEWORD_SAMPLE_DURATION_MS, DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS,
+    DEFAULT_WAKEWORD_MAX_RECORDING_MS, DEFAULT_WAKEWORD_NAME, DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS,
     DEFAULT_WAKEWORD_THRESHOLD,
 };
 
@@ -169,14 +168,6 @@ struct WakewordArgs {
     activation_grace_ms: Option<u64>,
     #[arg(long)]
     max_recording_ms: Option<u64>,
-    #[arg(long)]
-    sample_count: Option<usize>,
-    #[arg(long)]
-    sample_duration_ms: Option<u64>,
-    #[arg(long)]
-    training_command: Option<String>,
-    #[arg(long)]
-    retrain: bool,
     #[arg(long, conflicts_with = "no_append_space")]
     append_space: bool,
     #[arg(long)]
@@ -391,12 +382,6 @@ async fn run_wakeword_command(args: WakewordArgs) -> ExitCode {
         &file_config,
     ));
     let settings = resolve_wakeword_settings(&args, &file_config);
-    if args.retrain {
-        if let Err(error) = ensure_wakeword_model(&settings, true).await {
-            eprintln!("speaches-companion wakeword training failed: {error:#}");
-            return ExitCode::from(1);
-        }
-    }
     let run_config = WakewordRunConfig {
         settings,
         base_url: config.base_url,
@@ -589,19 +574,6 @@ fn resolve_wakeword_settings(args: &WakewordArgs, file_config: &FileConfig) -> W
                 .or(file_config.wakeword.silence_timeout_ms)
                 .unwrap_or(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS),
         ),
-        sample_count: args
-            .sample_count
-            .or(file_config.wakeword.sample_count)
-            .unwrap_or(DEFAULT_WAKEWORD_SAMPLE_COUNT),
-        sample_duration: Duration::from_millis(
-            args.sample_duration_ms
-                .or(file_config.wakeword.sample_duration_ms)
-                .unwrap_or(DEFAULT_WAKEWORD_SAMPLE_DURATION_MS),
-        ),
-        training_command: args
-            .training_command
-            .clone()
-            .or_else(|| file_config.wakeword.training_command.clone()),
         activation_grace: Duration::from_millis(
             args.activation_grace_ms
                 .or(file_config.wakeword.activation_grace_ms)
@@ -1318,8 +1290,6 @@ mod tests {
             settings.silence_timeout,
             Duration::from_millis(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS)
         );
-        assert_eq!(settings.sample_count, DEFAULT_WAKEWORD_SAMPLE_COUNT);
-        assert_eq!(settings.training_command, None);
     }
 
     #[test]
@@ -1334,9 +1304,6 @@ mod tests {
                 threshold: Some(0.72),
                 frame_ms: Some(40),
                 silence_timeout_ms: Some(700),
-                sample_count: Some(12),
-                sample_duration_ms: Some(1_200),
-                training_command: Some("train-wakeword".to_string()),
                 activation_grace_ms: Some(4_000),
                 max_recording_ms: Some(20_000),
             },
@@ -1356,9 +1323,6 @@ mod tests {
         assert_eq!(settings.threshold, 0.72);
         assert_eq!(settings.frame, Duration::from_millis(40));
         assert_eq!(settings.silence_timeout, Duration::from_millis(700));
-        assert_eq!(settings.sample_count, 12);
-        assert_eq!(settings.sample_duration, Duration::from_millis(1_200));
-        assert_eq!(settings.training_command.as_deref(), Some("train-wakeword"));
         assert_eq!(settings.activation_grace, Duration::from_millis(4_000));
         assert_eq!(settings.max_recording, Duration::from_millis(20_000));
     }
@@ -1379,10 +1343,6 @@ mod tests {
             "/tmp/cli-wakewords",
             "--threshold",
             "0.8",
-            "--sample-count",
-            "10",
-            "--training-command",
-            "custom-train",
             "--no-append-space",
             "--inject-delay-microsecs",
             "3000",
@@ -1394,8 +1354,6 @@ mod tests {
                 assets_dir: Some(PathBuf::from("/tmp/file-assets")),
                 root_dir: Some(PathBuf::from("/tmp/file-wakewords")),
                 threshold: Some(0.4),
-                sample_count: Some(3),
-                training_command: Some("file-train".to_string()),
                 ..WakewordFileConfig::default()
             },
             dictation: DictationFileConfig {
@@ -1414,8 +1372,6 @@ mod tests {
         assert_eq!(settings.assets_dir, Some(PathBuf::from("/tmp/cli-assets")));
         assert_eq!(settings.root_dir, PathBuf::from("/tmp/cli-wakewords"));
         assert_eq!(settings.threshold, 0.8);
-        assert_eq!(settings.sample_count, 10);
-        assert_eq!(settings.training_command.as_deref(), Some("custom-train"));
         assert!(!resolve_wakeword_append_space(&args, &file_config));
         assert_eq!(resolve_wakeword_inject_delay(&args, &file_config), 3_000);
     }
