@@ -19,7 +19,7 @@ use speaches_companion::notification::{
 use speaches_companion::phase::PhaseResult;
 use speaches_companion::realtime::{check_realtime, run_dictate_live, RealtimeTranscriber};
 use speaches_companion::streaming::{
-    FinalHttpTranscriber, LiveTranscriber, StreamingDictationController,
+    FinalHttpTranscriber, LiveTranscriber, PartialChunkingConfig, StreamingDictationController,
 };
 use speaches_companion::stt::{transcribe_file, ResponseFormat, TranscribeOptions};
 use speaches_companion::tts::{
@@ -30,6 +30,9 @@ use speaches_companion::tts::{
 const DEFAULT_LISTENING_MARKER: &str = "💬";
 const DEFAULT_INJECT_DELAY_MICROSECS: u32 = 0;
 const DEFAULT_LEADING_SILENCE_MS: u64 = 250;
+const DEFAULT_PARTIAL_CHUNK_DELAY_MS: u64 = 80;
+const DEFAULT_PARTIAL_CHUNK_MAX_DELAY_MS: u64 = 250;
+const DEFAULT_PARTIAL_CHUNKING: bool = true;
 const DEFAULT_PREROLL_MS: u64 = 750;
 
 #[derive(Debug, Parser)]
@@ -91,6 +94,14 @@ struct DaemonArgs {
     inline_partials: bool,
     #[arg(long)]
     no_inline_partials: bool,
+    #[arg(long, conflicts_with = "no_partial_chunking")]
+    partial_chunking: bool,
+    #[arg(long)]
+    no_partial_chunking: bool,
+    #[arg(long)]
+    partial_chunk_delay_ms: Option<u64>,
+    #[arg(long)]
+    partial_chunk_max_delay_ms: Option<u64>,
     #[arg(long, conflicts_with = "no_append_space")]
     append_space: bool,
     #[arg(long)]
@@ -365,6 +376,11 @@ where
     )
     .with_listening_marker(daemon_settings.listening_marker)
     .with_inline_partials(daemon_settings.inline_partials)
+    .with_partial_chunking_config(PartialChunkingConfig {
+        enabled: daemon_settings.partial_chunking,
+        delay: Duration::from_millis(daemon_settings.partial_chunk_delay_ms),
+        max_delay: Duration::from_millis(daemon_settings.partial_chunk_max_delay_ms),
+    })
     .with_final_transcript(daemon_settings.final_pass || !daemon_settings.realtime_partials)
     .with_append_space(daemon_settings.append_space);
 
@@ -391,6 +407,9 @@ struct DaemonSettings {
     final_pass: bool,
     listening_marker: Option<String>,
     inline_partials: bool,
+    partial_chunking: bool,
+    partial_chunk_delay_ms: u64,
+    partial_chunk_max_delay_ms: u64,
     append_space: bool,
     inject_delay_microsecs: u32,
     leading_silence_ms: u64,
@@ -413,6 +432,15 @@ fn resolve_daemon_settings(args: &DaemonArgs, file_config: &FileConfig) -> Daemo
         final_pass: resolve_final_pass(args, file_config),
         listening_marker: resolve_listening_marker(args, file_config),
         inline_partials: resolve_inline_partials(args, file_config),
+        partial_chunking: resolve_partial_chunking(args, file_config),
+        partial_chunk_delay_ms: args
+            .partial_chunk_delay_ms
+            .or(file_config.dictation.partial_chunk_delay_ms)
+            .unwrap_or(DEFAULT_PARTIAL_CHUNK_DELAY_MS),
+        partial_chunk_max_delay_ms: args
+            .partial_chunk_max_delay_ms
+            .or(file_config.dictation.partial_chunk_max_delay_ms)
+            .unwrap_or(DEFAULT_PARTIAL_CHUNK_MAX_DELAY_MS),
         append_space: resolve_append_space(args, file_config),
         inject_delay_microsecs: args
             .inject_delay_microsecs
@@ -478,6 +506,19 @@ fn resolve_inline_partials(args: &DaemonArgs, file_config: &FileConfig) -> bool 
         false
     } else {
         file_config.dictation.inline_partials.unwrap_or(true)
+    }
+}
+
+fn resolve_partial_chunking(args: &DaemonArgs, file_config: &FileConfig) -> bool {
+    if args.partial_chunking {
+        true
+    } else if args.no_partial_chunking {
+        false
+    } else {
+        file_config
+            .dictation
+            .partial_chunking
+            .unwrap_or(DEFAULT_PARTIAL_CHUNKING)
     }
 }
 
@@ -893,6 +934,15 @@ mod tests {
             Some(DEFAULT_LISTENING_MARKER.to_string())
         );
         assert!(settings.inline_partials);
+        assert!(settings.partial_chunking);
+        assert_eq!(
+            settings.partial_chunk_delay_ms,
+            DEFAULT_PARTIAL_CHUNK_DELAY_MS
+        );
+        assert_eq!(
+            settings.partial_chunk_max_delay_ms,
+            DEFAULT_PARTIAL_CHUNK_MAX_DELAY_MS
+        );
         assert!(settings.final_pass);
         assert!(settings.append_space);
         assert_eq!(settings.preroll_ms, DEFAULT_PREROLL_MS);
@@ -907,6 +957,10 @@ mod tests {
         let args = parse_daemon_args(["speaches-companion", "daemon", "--no-inline-partials"]);
         let settings = resolve_daemon_settings(&args, &FileConfig::default());
         assert!(!settings.inline_partials);
+
+        let args = parse_daemon_args(["speaches-companion", "daemon", "--no-partial-chunking"]);
+        let settings = resolve_daemon_settings(&args, &FileConfig::default());
+        assert!(!settings.partial_chunking);
 
         let args = parse_daemon_args(["speaches-companion", "daemon", "--no-append-space"]);
         let settings = resolve_daemon_settings(&args, &FileConfig::default());
@@ -926,6 +980,9 @@ mod tests {
                 final_pass: Some(false),
                 listening_marker: Some("...".to_string()),
                 inline_partials: Some(false),
+                partial_chunking: Some(false),
+                partial_chunk_delay_ms: Some(25),
+                partial_chunk_max_delay_ms: Some(90),
                 append_space: Some(false),
                 inject_delay_microsecs: Some(3_000),
                 leading_silence_ms: Some(400),
@@ -944,6 +1001,9 @@ mod tests {
         assert!(!settings.final_pass);
         assert_eq!(settings.listening_marker, Some("...".to_string()));
         assert!(!settings.inline_partials);
+        assert!(!settings.partial_chunking);
+        assert_eq!(settings.partial_chunk_delay_ms, 25);
+        assert_eq!(settings.partial_chunk_max_delay_ms, 90);
         assert!(!settings.append_space);
         assert_eq!(settings.inject_delay_microsecs, 3_000);
         assert_eq!(settings.leading_silence_ms, 400);
@@ -1052,6 +1112,22 @@ mod tests {
         let settings = resolve_daemon_settings(&args, &FileConfig::default());
 
         assert_eq!(settings.inject_delay_microsecs, 3_000);
+    }
+
+    #[test]
+    fn daemon_accepts_custom_partial_chunking_delays() {
+        let args = parse_daemon_args([
+            "speaches-companion",
+            "daemon",
+            "--partial-chunk-delay-ms",
+            "40",
+            "--partial-chunk-max-delay-ms",
+            "120",
+        ]);
+        let settings = resolve_daemon_settings(&args, &FileConfig::default());
+
+        assert_eq!(settings.partial_chunk_delay_ms, 40);
+        assert_eq!(settings.partial_chunk_max_delay_ms, 120);
     }
 
     #[test]

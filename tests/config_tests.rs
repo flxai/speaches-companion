@@ -176,6 +176,9 @@ realtime_partials = true
 final_pass = false
 listening_marker = "..."
 inline_partials = false
+partial_chunking = false
+partial_chunk_delay_ms = 40
+partial_chunk_max_delay_ms = 120
 append_space = false
 inject_delay_microsecs = 3000
 leading_silence_ms = 400
@@ -207,6 +210,9 @@ preroll_ms = 1000
     assert_eq!(config.dictation.final_pass, Some(false));
     assert_eq!(config.dictation.listening_marker.as_deref(), Some("..."));
     assert_eq!(config.dictation.inline_partials, Some(false));
+    assert_eq!(config.dictation.partial_chunking, Some(false));
+    assert_eq!(config.dictation.partial_chunk_delay_ms, Some(40));
+    assert_eq!(config.dictation.partial_chunk_max_delay_ms, Some(120));
     assert_eq!(config.dictation.append_space, Some(false));
     assert_eq!(config.dictation.inject_delay_microsecs, Some(3_000));
     assert_eq!(config.dictation.leading_silence_ms, Some(400));

@@ -60,6 +60,9 @@ pub struct DictationFileConfig {
     pub final_pass: Option<bool>,
     pub listening_marker: Option<String>,
     pub inline_partials: Option<bool>,
+    pub partial_chunking: Option<bool>,
+    pub partial_chunk_delay_ms: Option<u64>,
+    pub partial_chunk_max_delay_ms: Option<u64>,
     pub append_space: Option<bool>,
     pub inject_delay_microsecs: Option<u32>,
     pub leading_silence_ms: Option<u64>,
@@ -215,7 +218,7 @@ pub fn load_file_config_at(path: &Path) -> anyhow::Result<FileConfig> {
         Ok(contents) => contents,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(FileConfig::default()),
         Err(error) => {
-            return Err(error).with_context(|| format!("failed to read config {}", path.display()))
+            return Err(error).with_context(|| format!("failed to read config {}", path.display()));
         }
     };
 

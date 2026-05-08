@@ -7,6 +7,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 #[cfg(feature = "debug-recordings")]
 use crate::audio::write_pcm_mp3;
@@ -35,10 +36,29 @@ const TRIM_MIN_SPEECH: Duration = Duration::from_millis(120);
 const FIXED_SPEECH_RMS_FLOOR: f64 = 700.0;
 const MAX_SPEECH_RMS_FLOOR: f64 = 1_500.0;
 const NOISE_FLOOR_MULTIPLIER: f64 = 4.0;
+pub const DEFAULT_PARTIAL_CHUNK_DELAY: Duration = Duration::from_millis(80);
+pub const DEFAULT_PARTIAL_CHUNK_MAX_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveTranscriptUpdate {
     pub transcript: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartialChunkingConfig {
+    pub enabled: bool,
+    pub delay: Duration,
+    pub max_delay: Duration,
+}
+
+impl Default for PartialChunkingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            delay: DEFAULT_PARTIAL_CHUNK_DELAY,
+            max_delay: DEFAULT_PARTIAL_CHUNK_MAX_DELAY,
+        }
+    }
 }
 
 pub struct LiveTranscriptionSession<S> {
@@ -67,6 +87,7 @@ where
     error_notifier: N,
     listening_marker: Option<String>,
     inline_partials: bool,
+    partial_chunking: PartialChunkingConfig,
     final_transcript: bool,
     append_space: bool,
     active: Option<ActiveStreamingSession<L::Session, I>>,
@@ -96,6 +117,126 @@ enum PartialTextCommand {
     },
 }
 
+#[derive(Debug)]
+struct PartialDisplayState {
+    latest_partial: Option<String>,
+    displayed_partial: Option<String>,
+    last_announced_partial: Option<String>,
+    waiting_marker: Option<String>,
+    last_displayed_text: String,
+    dirty_started_at: Option<Instant>,
+    last_update_at: Option<Instant>,
+    last_flush_at: Option<Instant>,
+}
+
+impl PartialDisplayState {
+    fn new(initial_display_text: String) -> Self {
+        Self {
+            latest_partial: None,
+            displayed_partial: None,
+            last_announced_partial: None,
+            waiting_marker: None,
+            last_displayed_text: initial_display_text,
+            dirty_started_at: None,
+            last_update_at: None,
+            last_flush_at: None,
+        }
+    }
+
+    fn update_latest_partial(&mut self, transcript: String) -> bool {
+        if self.latest_partial.as_deref() == Some(transcript.as_str()) {
+            return false;
+        }
+        self.latest_partial = Some(transcript);
+        true
+    }
+
+    fn note_pending_flush(&mut self, now: Instant) {
+        self.dirty_started_at.get_or_insert(now);
+        self.last_update_at = Some(now);
+    }
+
+    fn flush_deadline(&self, config: PartialChunkingConfig) -> Option<Instant> {
+        let dirty_started_at = self.dirty_started_at?;
+        let last_update_at = self.last_update_at.unwrap_or(dirty_started_at);
+        let max_anchor = self.last_flush_at.unwrap_or(dirty_started_at);
+        Some(std::cmp::min(
+            last_update_at + config.delay,
+            max_anchor + config.max_delay,
+        ))
+    }
+
+    fn has_pending_partial(&self) -> bool {
+        self.latest_partial != self.displayed_partial
+    }
+
+    fn announce_partial<V>(&mut self, transcript_notifier: &V, transcript: &str)
+    where
+        V: TranscriptNotifier,
+    {
+        if self.last_announced_partial.as_deref() == Some(transcript) {
+            return;
+        }
+        notify_transcript(transcript_notifier, |notifier| {
+            notifier.notify_partial(transcript)
+        });
+        self.last_announced_partial = Some(transcript.to_string());
+    }
+
+    fn flush_display<I, V>(
+        &mut self,
+        text_session: &mut SpeculativeTextSession<I>,
+        transcript_notifier: &V,
+        now: Instant,
+    ) -> anyhow::Result<()>
+    where
+        I: TextInjector,
+        V: TranscriptNotifier,
+    {
+        let display_text = displayed_partial_text(
+            self.latest_partial.as_deref(),
+            self.waiting_marker.as_deref(),
+        );
+        if display_text == self.last_displayed_text {
+            self.displayed_partial = self.latest_partial.clone();
+            self.dirty_started_at = None;
+            self.last_update_at = None;
+            return Ok(());
+        }
+
+        text_session.replace_text(&display_text)?;
+        self.last_displayed_text = display_text;
+        self.displayed_partial = self.latest_partial.clone();
+        self.dirty_started_at = None;
+        self.last_update_at = None;
+        self.last_flush_at = Some(now);
+
+        if let Some(partial) = self.latest_partial.clone() {
+            self.announce_partial(transcript_notifier, &partial);
+        }
+
+        Ok(())
+    }
+
+    fn show_waiting_marker<I, V>(
+        &mut self,
+        marker: Option<String>,
+        text_session: &mut SpeculativeTextSession<I>,
+        transcript_notifier: &V,
+        now: Instant,
+    ) -> anyhow::Result<()>
+    where
+        I: TextInjector,
+        V: TranscriptNotifier,
+    {
+        if self.has_pending_partial() {
+            self.flush_display(text_session, transcript_notifier, now)?;
+        }
+        self.waiting_marker = marker;
+        self.flush_display(text_session, transcript_notifier, now)
+    }
+}
+
 impl<L, I> StreamingDictationController<L, I>
 where
     L: LiveTranscriber,
@@ -109,6 +250,7 @@ where
             error_notifier: NoopErrorNotifier,
             listening_marker: None,
             inline_partials: true,
+            partial_chunking: PartialChunkingConfig::default(),
             final_transcript: true,
             append_space: true,
             active: None,
@@ -136,6 +278,7 @@ where
             error_notifier,
             listening_marker: None,
             inline_partials: true,
+            partial_chunking: PartialChunkingConfig::default(),
             final_transcript: true,
             append_space: true,
             active: None,
@@ -150,6 +293,11 @@ where
 
     pub fn with_inline_partials(mut self, inline_partials: bool) -> Self {
         self.inline_partials = inline_partials;
+        self
+    }
+
+    pub fn with_partial_chunking_config(mut self, partial_chunking: PartialChunkingConfig) -> Self {
+        self.partial_chunking = partial_chunking;
         self
     }
 
@@ -228,6 +376,7 @@ where
             self.error_notifier.clone(),
             text_session,
             self.inline_partials,
+            self.partial_chunking,
         ));
         self.active = Some(ActiveStreamingSession {
             session: live_session.session,
@@ -348,46 +497,67 @@ async fn consume_live_updates<I, V, N>(
     error_notifier: N,
     mut text_session: SpeculativeTextSession<I>,
     inline_partials: bool,
+    partial_chunking: PartialChunkingConfig,
 ) -> PartialTextSession<I>
 where
     I: TextInjector,
     V: TranscriptNotifier,
     N: ErrorNotifier,
 {
-    let mut latest_partial = None;
-    let mut waiting_marker = None;
+    let mut display_state = PartialDisplayState::new(text_session.inserted_text().to_string());
     let mut updates_open = true;
     let mut commands_open = true;
+    let mut flush_timer = Box::pin(tokio::time::sleep_until(
+        Instant::now() + Duration::from_secs(24 * 60 * 60),
+    ));
     while updates_open || commands_open {
+        let next_flush_deadline = display_state.flush_deadline(partial_chunking);
+        if let Some(deadline) = next_flush_deadline {
+            flush_timer.as_mut().reset(deadline);
+        }
         tokio::select! {
             update = updates.recv(), if updates_open => {
                 let Some(update) = update else {
                     updates_open = false;
                     continue;
                 };
+                let ends_at_boundary = ends_at_stable_boundary(&update.transcript);
                 let transcript = normalize_transcript_for_injection(&update.transcript);
                 let Some(transcript) = transcript else {
                     continue;
                 };
-                if latest_partial.as_deref() == Some(transcript.as_str()) && waiting_marker.is_none() {
+                if !display_state.update_latest_partial(transcript.clone()) {
                     continue;
                 }
-                latest_partial = Some(transcript.clone());
-                let mut displayed_inline = false;
-                if inline_partials || waiting_marker.is_some() {
-                    let display_text = displayed_partial_text(latest_partial.as_deref(), waiting_marker.as_deref());
-                    match text_session.replace_text(&display_text) {
-                        Ok(changed) => displayed_inline = changed,
-                        Err(error) => {
-                            notify_failure(&error_notifier, "Partial text replacement failed", &error);
-                            break;
-                        }
-                    }
+                if !inline_partials && display_state.waiting_marker.is_none() {
+                    display_state.announce_partial(&transcript_notifier, &transcript);
+                    continue;
                 }
-                if displayed_inline || !inline_partials {
-                    notify_transcript(&transcript_notifier, |notifier| {
-                        notifier.notify_partial(&transcript)
-                    });
+
+                let should_flush_now = display_state.waiting_marker.is_some()
+                    || !partial_chunking.enabled
+                    || ends_at_boundary;
+                if should_flush_now {
+                    if let Err(error) = display_state.flush_display(
+                        &mut text_session,
+                        &transcript_notifier,
+                        Instant::now(),
+                    ) {
+                        notify_failure(&error_notifier, "Partial text replacement failed", &error);
+                        break;
+                    }
+                } else {
+                    display_state.note_pending_flush(Instant::now());
+                }
+            }
+            _ = &mut flush_timer, if next_flush_deadline.is_some() => {
+                if let Err(error) = display_state.flush_display(
+                    &mut text_session,
+                    &transcript_notifier,
+                    Instant::now(),
+                ) {
+                    notify_failure(&error_notifier, "Partial text replacement failed", &error);
+                    break;
                 }
             }
             command = commands.recv(), if commands_open => {
@@ -397,23 +567,30 @@ where
                 };
                 match command {
                     PartialTextCommand::ShowWaitingMarker { marker, ack } => {
-                        waiting_marker = marker.and_then(|marker| normalize_transcript_for_injection(&marker));
-                        let result = match waiting_marker.as_deref() {
-                            Some(_) => {
-                                let display_text = displayed_partial_text(latest_partial.as_deref(), waiting_marker.as_deref());
-                                text_session.replace_text(&display_text).map(|_| ())
-                            }
-                            None => Ok(()),
-                        };
+                        let marker =
+                            marker.and_then(|marker| normalize_transcript_for_injection(&marker));
+                        let result = display_state.show_waiting_marker(
+                            marker,
+                            &mut text_session,
+                            &transcript_notifier,
+                            Instant::now(),
+                        );
                         let _ = ack.send(result);
                     }
                 }
             }
         }
     }
+    if display_state.has_pending_partial() {
+        if let Err(error) =
+            display_state.flush_display(&mut text_session, &transcript_notifier, Instant::now())
+        {
+            notify_failure(&error_notifier, "Partial text replacement failed", &error);
+        }
+    }
     PartialTextSession {
         text_session,
-        latest_partial,
+        latest_partial: display_state.latest_partial,
     }
 }
 
@@ -454,6 +631,29 @@ fn append_marker(text: &str, marker: &str) -> String {
     } else {
         format!("{text} {marker}")
     }
+}
+
+fn ends_at_stable_boundary(transcript: &str) -> bool {
+    transcript.chars().last().is_some_and(|last_char| {
+        last_char.is_whitespace()
+            || matches!(
+                last_char,
+                '.' | ','
+                    | '!'
+                    | '?'
+                    | ';'
+                    | ':'
+                    | ')'
+                    | ']'
+                    | '}'
+                    | '"'
+                    | '\''
+                    | '»'
+                    | '”'
+                    | '’'
+                    | '…'
+            )
+    })
 }
 
 async fn finish_partial_task<I>(

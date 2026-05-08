@@ -9,7 +9,8 @@ use speaches_companion::notification::{
     ErrorNotifier, TranscriptNotifier, DICTATION_ERROR_SUMMARY,
 };
 use speaches_companion::streaming::{
-    LiveTranscriber, LiveTranscriptUpdate, LiveTranscriptionSession, StreamingDictationController,
+    LiveTranscriber, LiveTranscriptUpdate, LiveTranscriptionSession, PartialChunkingConfig,
+    StreamingDictationController,
 };
 use tokio::sync::mpsc;
 
@@ -52,8 +53,7 @@ async fn streaming_hotkey_replaces_partial_text_with_final_text() {
     assert_eq!(
         *operations.lock().unwrap(),
         vec![
-            InjectOperation::Type("hel".to_string()),
-            InjectOperation::Type("lo win".to_string()),
+            InjectOperation::Type("hello win".to_string()),
             InjectOperation::Type("dow ".to_string()),
         ]
     );
@@ -61,7 +61,6 @@ async fn streaming_hotkey_replaces_partial_text_with_final_text() {
         *transcript_events.lock().unwrap(),
         vec![
             TranscriptNotice::Listening,
-            TranscriptNotice::Partial("hel".to_string()),
             TranscriptNotice::Partial("hello win".to_string()),
             TranscriptNotice::Final("hello window".to_string()),
         ]
@@ -79,7 +78,8 @@ async fn streaming_injects_live_partial_before_hotkey_up() {
         injector,
         FakeTranscriptNotifier::default(),
         FakeErrorNotifier::default(),
-    );
+    )
+    .with_partial_chunking_config(no_chunking());
 
     controller
         .handle_hotkey(IpcCommand::HotkeyDown)
@@ -105,7 +105,8 @@ async fn streaming_empty_live_update_keeps_existing_provisional_text() {
         injector,
         FakeTranscriptNotifier::default(),
         FakeErrorNotifier::default(),
-    );
+    )
+    .with_partial_chunking_config(no_chunking());
 
     controller
         .handle_hotkey(IpcCommand::HotkeyDown)
@@ -134,6 +135,7 @@ async fn streaming_empty_live_update_does_not_erase_marker_or_text() {
         FakeTranscriptNotifier::default(),
         FakeErrorNotifier::default(),
     )
+    .with_partial_chunking_config(no_chunking())
     .with_listening_marker(Some("💬".to_string()));
 
     controller
@@ -170,6 +172,7 @@ async fn streaming_marker_is_replaced_by_live_partial_before_hotkey_up() {
         FakeTranscriptNotifier::default(),
         FakeErrorNotifier::default(),
     )
+    .with_partial_chunking_config(no_chunking())
     .with_listening_marker(Some("💬".to_string()));
 
     controller
@@ -206,6 +209,7 @@ async fn streaming_marker_is_replaced_by_partial_and_final_text() {
         FakeTranscriptNotifier::default(),
         FakeErrorNotifier::default(),
     )
+    .with_partial_chunking_config(no_chunking())
     .with_listening_marker(Some("💬".to_string()));
 
     controller
@@ -253,7 +257,6 @@ async fn streaming_shows_wait_marker_while_final_transcript_is_pending() {
         .await
         .unwrap();
     updates.send("hello").await;
-    wait_for_operations_len(&operations, 3).await;
 
     let stop_task = tokio::spawn(async move {
         controller
@@ -424,7 +427,10 @@ async fn streaming_can_defer_partial_injection_until_stop() {
 
     assert_eq!(
         *operations.lock().unwrap(),
-        vec![InjectOperation::Type("fallback text ".to_string())]
+        vec![
+            InjectOperation::Type("fallback text".to_string()),
+            InjectOperation::Type(" ".to_string()),
+        ]
     );
 }
 
@@ -441,7 +447,8 @@ async fn streaming_stop_error_keeps_speculative_partial_and_notifies() {
         injector,
         FakeTranscriptNotifier::default(),
         error_notifier,
-    );
+    )
+    .with_partial_chunking_config(no_chunking());
 
     controller
         .handle_hotkey(IpcCommand::HotkeyDown)
@@ -595,6 +602,7 @@ async fn streaming_trailing_space_can_be_disabled() {
         FakeTranscriptNotifier::default(),
         FakeErrorNotifier::default(),
     )
+    .with_partial_chunking_config(no_chunking())
     .with_append_space(false);
 
     controller
@@ -613,6 +621,140 @@ async fn streaming_trailing_space_can_be_disabled() {
             InjectOperation::Type("lo win".to_string()),
             InjectOperation::Type("dow".to_string()),
         ]
+    );
+}
+
+#[tokio::test]
+async fn streaming_no_partial_chunking_preserves_immediate_injection() {
+    let transcriber = ManualLiveTranscriber::new("hello window");
+    let updates = transcriber.updates.clone();
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        FakeErrorNotifier::default(),
+    )
+    .with_partial_chunking_config(no_chunking());
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    updates.send("hel").await;
+    wait_for_operations_len(&operations, 1).await;
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![InjectOperation::Type("hel".to_string())]
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn streaming_partial_chunking_coalesces_character_updates() {
+    let transcriber = ManualLiveTranscriber::new(" \n");
+    let updates = transcriber.updates.clone();
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        FakeErrorNotifier::default(),
+    );
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    updates.send("h").await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(40)).await;
+    updates.send("he").await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(40)).await;
+    updates.send("hel").await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(79)).await;
+    tokio::task::yield_now().await;
+
+    assert!(operations.lock().unwrap().is_empty());
+
+    tokio::time::advance(Duration::from_millis(1)).await;
+    wait_for_operations_len(&operations, 1).await;
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![InjectOperation::Type("hel".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn streaming_partial_chunking_flushes_immediately_at_word_boundary() {
+    let transcriber = ManualLiveTranscriber::new("hello window");
+    let updates = transcriber.updates.clone();
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        FakeErrorNotifier::default(),
+    );
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    updates.send("hello ").await;
+    wait_for_operations_len(&operations, 1).await;
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![InjectOperation::Type("hello".to_string())]
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn streaming_partial_chunking_forces_max_delay_flush() {
+    let transcriber = ManualLiveTranscriber::new(" \n");
+    let updates = transcriber.updates.clone();
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        FakeErrorNotifier::default(),
+    );
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    updates.send("h").await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(70)).await;
+    updates.send("he").await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(70)).await;
+    updates.send("hel").await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(70)).await;
+    updates.send("hell").await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(39)).await;
+    tokio::task::yield_now().await;
+
+    assert!(operations.lock().unwrap().is_empty());
+
+    tokio::time::advance(Duration::from_millis(1)).await;
+    wait_for_operations_len(&operations, 1).await;
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![InjectOperation::Type("hell".to_string())]
     );
 }
 
@@ -773,20 +915,29 @@ impl ManualLiveUpdates {
     }
 }
 
+fn no_chunking() -> PartialChunkingConfig {
+    PartialChunkingConfig {
+        enabled: false,
+        ..PartialChunkingConfig::default()
+    }
+}
+
 async fn wait_for_operations_len(
     operations: &Arc<Mutex<Vec<InjectOperation>>>,
     expected_len: usize,
 ) {
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if operations.lock().unwrap().len() >= expected_len {
-                return;
-            }
-            tokio::task::yield_now().await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        if operations.lock().unwrap().len() >= expected_len {
+            return;
         }
-    })
-    .await
-    .unwrap();
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {expected_len} inject operations; saw {:?}",
+            *operations.lock().unwrap()
+        );
+        tokio::task::yield_now().await;
+    }
 }
 
 #[derive(Clone)]
