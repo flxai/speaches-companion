@@ -1,5 +1,5 @@
 use serde_json::json;
-use speaches_scribe::trace::TraceWriter;
+use speaches_companion::trace::TraceWriter;
 use tempfile::tempdir;
 
 #[tokio::test]

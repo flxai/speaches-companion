@@ -274,7 +274,7 @@ impl LiveTranscriber for RealtimeTranscriber {
         let pcm_session =
             StreamingPcmSession::start(shared_pcm, self.sample_rate, self.preroll).await?;
         eprintln!(
-            "speaches-scribe realtime hotkey-down audio buffer: {:.2}s available; retained {:.2}s pre-roll (requested {}ms)",
+            "speaches-companion realtime hotkey-down audio buffer: {:.2}s available; retained {:.2}s pre-roll (requested {}ms)",
             pcm_duration(self.sample_rate, pcm_session.available_at_start_bytes()).as_secs_f64(),
             pcm_duration(self.sample_rate, pcm_session.retained_preroll_bytes()).as_secs_f64(),
             self.preroll.as_millis()
@@ -475,11 +475,11 @@ where
             match preserve_recording_snapshot(record_dir, &snapshot, sample_rate, "realtime").await
             {
                 Ok(path) => eprintln!(
-                    "speaches-scribe preserved MP3 recording at {}",
+                    "speaches-companion preserved MP3 recording at {}",
                     path.display()
                 ),
                 Err(error) => {
-                    eprintln!("speaches-scribe failed to preserve MP3 recording: {error:#}")
+                    eprintln!("speaches-companion failed to preserve MP3 recording: {error:#}")
                 }
             }
         }

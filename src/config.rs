@@ -230,7 +230,7 @@ pub fn resolve_config_path_with_env(
         return Ok(path);
     }
     if let Some(path) = env
-        .get("SPEACHES_SCRIBE_CONFIG")
+        .get("SPEACHES_COMPANION_CONFIG")
         .and_then(|value| non_empty_str(value))
     {
         return Ok(PathBuf::from(path));
@@ -244,16 +244,16 @@ pub fn default_config_path_with_env(env: &BTreeMap<String, String>) -> anyhow::R
         .and_then(|value| non_empty_str(value))
     {
         return Ok(PathBuf::from(path)
-            .join("speaches-scribe")
+            .join("speaches-companion")
             .join("config.toml"));
     }
     if let Some(home) = env.get("HOME").and_then(|value| non_empty_str(value)) {
         return Ok(PathBuf::from(home)
             .join(".config")
-            .join("speaches-scribe")
+            .join("speaches-companion")
             .join("config.toml"));
     }
-    bail!("failed to resolve speaches-scribe config path: XDG_CONFIG_HOME and HOME are unset")
+    bail!("failed to resolve speaches-companion config path: XDG_CONFIG_HOME and HOME are unset")
 }
 
 pub fn realtime_ws_url(
@@ -342,6 +342,6 @@ fn default_trace_path() -> PathBuf {
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
     PathBuf::from("target")
-        .join("speaches-scribe-traces")
+        .join("speaches-companion-traces")
         .join(format!("dictate-live-{millis}.jsonl"))
 }

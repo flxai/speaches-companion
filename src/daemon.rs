@@ -68,7 +68,7 @@ where
     prepare_socket_path(socket_path).await?;
     let listener = UnixListener::bind(socket_path).with_context(|| {
         format!(
-            "failed to bind speaches-scribe daemon socket {}",
+            "failed to bind speaches-companion daemon socket {}",
             socket_path.display()
         )
     })?;
@@ -78,11 +78,11 @@ where
         let (stream, _) = listener
             .accept()
             .await
-            .context("failed to accept speaches-scribe IPC client")?;
+            .context("failed to accept speaches-companion IPC client")?;
         let handler = Arc::clone(&handler);
         tokio::spawn(async move {
             if let Err(error) = handle_client(stream, handler).await {
-                eprintln!("speaches-scribe daemon client error: {error:#}");
+                eprintln!("speaches-companion daemon client error: {error:#}");
             }
         });
     }
@@ -123,7 +123,7 @@ async fn handle_client(
     stream
         .read_to_string(&mut request)
         .await
-        .context("failed to read speaches-scribe IPC request")?;
+        .context("failed to read speaches-companion IPC request")?;
     let command = parse_command(&request)?;
     let response = {
         let mut handler = handler.lock().await;
@@ -132,6 +132,6 @@ async fn handle_client(
     stream
         .write_all(format!("{}\n", response.as_str()).as_bytes())
         .await
-        .context("failed to write speaches-scribe IPC response")?;
+        .context("failed to write speaches-companion IPC response")?;
     Ok(())
 }

@@ -17,7 +17,7 @@
       lib = pkgs.lib;
 
       commonArgs = {
-        pname = "speaches-scribe";
+        pname = "speaches-companion";
         version = "0.3.0";
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
@@ -30,25 +30,25 @@
 
         meta = with lib; {
           description = "Speaches twin for Linux desktop dictation";
-          mainProgram = "speaches-scribe";
+          mainProgram = "speaches-companion";
           platforms = platforms.linux;
         };
       };
 
-      speachesScribe = pkgs.rustPlatform.buildRustPackage (commonArgs
+      speachesCompanion = pkgs.rustPlatform.buildRustPackage (commonArgs
         // {
           doCheck = false;
           nativeBuildInputs = [
             pkgs.makeWrapper
           ];
           postInstall = ''
-            wrapProgram "$out/bin/speaches-scribe" \
+            wrapProgram "$out/bin/speaches-companion" \
               --prefix PATH : ${lib.makeBinPath [pkgs.ffmpeg pkgs.pipewire pkgs.sway pkgs.wtype pkgs.xclip]}
           '';
         });
 
       fmt =
-        pkgs.runCommand "speaches-scribe-fmt-check" {
+        pkgs.runCommand "speaches-companion-fmt-check" {
           nativeBuildInputs = [
             pkgs.cargo
             pkgs.rustfmt
@@ -64,14 +64,14 @@
 
       clippy = pkgs.rustPlatform.buildRustPackage (commonArgs
         // {
-          pname = "speaches-scribe-clippy";
+          pname = "speaches-companion-clippy";
           doCheck = true;
           nativeBuildInputs = [
             pkgs.clippy
           ];
           buildPhase = ''
             runHook preBuild
-            touch speaches-scribe-clippy
+            touch speaches-companion-clippy
             runHook postBuild
           '';
           checkPhase = ''
@@ -88,11 +88,11 @@
 
       tests = pkgs.rustPlatform.buildRustPackage (commonArgs
         // {
-          pname = "speaches-scribe-test";
+          pname = "speaches-companion-test";
           doCheck = true;
           buildPhase = ''
             runHook preBuild
-            touch speaches-scribe-test
+            touch speaches-companion-test
             runHook postBuild
           '';
           checkPhase = ''
@@ -109,24 +109,24 @@
 
       mkSubcommandApp = subcommand: description: let
         app = pkgs.writeShellApplication {
-          name = "speaches-scribe-${subcommand}";
+          name = "speaches-companion-${subcommand}";
           text = ''
-            exec ${speachesScribe}/bin/speaches-scribe ${subcommand} "$@"
+            exec ${speachesCompanion}/bin/speaches-companion ${subcommand} "$@"
           '';
         };
       in {
         type = "app";
-        program = "${app}/bin/speaches-scribe-${subcommand}";
+        program = "${app}/bin/speaches-companion-${subcommand}";
         meta.description = description;
       };
     in {
       packages = {
-        default = speachesScribe;
-        speaches-scribe = speachesScribe;
+        default = speachesCompanion;
+        speaches-companion = speachesCompanion;
       };
 
       checks = {
-        default = speachesScribe;
+        default = speachesCompanion;
         fmt = fmt;
         clippy = clippy;
         test = tests;
@@ -135,15 +135,15 @@
       apps = {
         default = {
           type = "app";
-          program = "${speachesScribe}/bin/speaches-scribe";
-          meta.description = "Run speaches-scribe";
+          program = "${speachesCompanion}/bin/speaches-companion";
+          meta.description = "Run speaches-companion";
         };
-        speaches-scribe = {
+        speaches-companion = {
           type = "app";
-          program = "${speachesScribe}/bin/speaches-scribe";
-          meta.description = "Run speaches-scribe";
+          program = "${speachesCompanion}/bin/speaches-companion";
+          meta.description = "Run speaches-companion";
         };
-        daemon = mkSubcommandApp "daemon" "Run the speaches-scribe hotkey daemon";
+        daemon = mkSubcommandApp "daemon" "Run the speaches-companion hotkey daemon";
         "dictate-live" = mkSubcommandApp "dictate-live" "Run realtime dictation";
         hotkey = mkSubcommandApp "hotkey" "Send a hotkey IPC command";
         inject = mkSubcommandApp "inject" "Type text into the focused desktop window";
@@ -155,7 +155,7 @@
 
       devShells.default = pkgs.mkShell {
         inputsFrom = [
-          speachesScribe
+          speachesCompanion
           clippy
         ];
         packages = with pkgs; [

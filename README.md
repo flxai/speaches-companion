@@ -1,16 +1,16 @@
-# speaches-scribe
+# speaches-companion
 
 Linux desktop dictation for Speaches.
 
-`speaches-scribe` is the desktop twin to
+`speaches-companion` is the desktop twin to
 [Speaches](https://github.com/speaches-ai/speaches): Speaches runs the speech
-service, and `speaches-scribe` captures microphone audio, sends it to Speaches
+service, and `speaches-companion` captures microphone audio, sends it to Speaches
 for STT, injects the transcript into the focused X11 window, and can send
 selected text to Speaches TTS for read-aloud playback. It is not a standalone
 speech engine and only works in conjunction with a running Speaches-compatible
 server.
 
-The Nix flake is the primary interface. It builds the `speaches-scribe` binary,
+The Nix flake is the primary interface. It builds the `speaches-companion` binary,
 wraps it with the required PipeWire and X11 selection helpers, and exposes the
 daemon, hotkey, read-aloud, smoke-test, injection, and transcription subcommands
 as flake apps.
@@ -21,7 +21,7 @@ Run the default CLI from the flake:
 
 ```sh
 nix run . -- --help
-nix run .#speaches-scribe -- --help
+nix run .#speaches-companion -- --help
 nix run . -- daemon
 ```
 
@@ -38,11 +38,11 @@ nix run .#read-aloud -- --text "hello from Speaches"
 nix run .#realtime-check
 ```
 
-`speaches-scribe` reads configuration from
-`$XDG_CONFIG_HOME/speaches-scribe/config.toml`, falling back to
-`~/.config/speaches-scribe/config.toml`. Use `--config` on `daemon`,
+`speaches-companion` reads configuration from
+`$XDG_CONFIG_HOME/speaches-companion/config.toml`, falling back to
+`~/.config/speaches-companion/config.toml`. Use `--config` on `daemon`,
 `read-aloud`, `transcribe`, `smoke`, and `dictate-live`, or set
-`SPEACHES_SCRIBE_CONFIG`, to point at another file. Missing config files are
+`SPEACHES_COMPANION_CONFIG`, to point at another file. Missing config files are
 treated as empty.
 
 ```toml
@@ -62,8 +62,8 @@ player = "pw-play"
 player_args = ["--raw", "--rate", "24000", "--channels", "1", "--format", "s16"]
 
 [dictation]
-transcript_dir = "target/speaches-scribe-transcripts"
-record_dir = "target/speaches-scribe-recordings"
+transcript_dir = "target/speaches-companion-transcripts"
+record_dir = "target/speaches-companion-recordings"
 stream_response = false
 realtime_partials = true
 final_pass = false
@@ -77,16 +77,16 @@ preroll_ms = 750
 
 For compatible existing setups, environment and CLI values still work. The
 resolution order is CLI flags, then environment variables, then TOML, then
-built-in defaults. `SPEACHES_BASE_URL`, `SPEACHES_SCRIBE_MODEL`, and
-`SPEACHES_SCRIBE_LANGUAGE` configure STT; the legacy `SPEACHES_STT_MODEL` is
+built-in defaults. `SPEACHES_BASE_URL`, `SPEACHES_COMPANION_MODEL`, and
+`SPEACHES_COMPANION_LANGUAGE` configure STT; the legacy `SPEACHES_STT_MODEL` is
 still accepted as a model fallback.
 
 Read-aloud uses Speaches' OpenAI-compatible `/v1/audio/speech` endpoint. Without
 `--text`, it reads the X11 primary selection and falls back to the clipboard,
 then plays the returned audio with `pw-play`. Configure TTS with
-`SPEACHES_SCRIBE_TTS_MODEL`, `SPEACHES_SCRIBE_TTS_VOICE`, and
-`SPEACHES_SCRIBE_TTS_RESPONSE_FORMAT`, or the matching TOML and CLI values.
-Use `--speed`, `SPEACHES_SCRIBE_TTS_SPEED`, or `tts.speed` to adjust speech
+`SPEACHES_COMPANION_TTS_MODEL`, `SPEACHES_COMPANION_TTS_VOICE`, and
+`SPEACHES_COMPANION_TTS_RESPONSE_FORMAT`, or the matching TOML and CLI values.
+Use `--speed`, `SPEACHES_COMPANION_TTS_SPEED`, or `tts.speed` to adjust speech
 rate. Use repeated `--player-arg` flags or `tts.player_args` when the selected
 response format needs player-specific options, for example raw PCM playback.
 
@@ -95,7 +95,7 @@ transcription request to Speaches on release. Set `realtime_partials = true` to
 use Speaches' realtime WebSocket path for live partials while recording. For
 realtime dictation, set `final_pass = false` or pass `--no-final-pass` to stop
 on the latest live hypothesis instead of committing a final transcription job on
-release. If focus changes during a recording, `speaches-scribe` stops editing
+release. If focus changes during a recording, `speaches-companion` stops editing
 the target window instead of sending Backspaces to the wrong place.
 
 On startup the daemon starts continuous `pw-record` capture before it accepts
@@ -148,7 +148,7 @@ nix run . -- daemon --preroll-ms 1000
 To preserve accepted transcripts, set a transcript directory:
 
 ```sh
-nix run . -- daemon --transcript-dir target/speaches-scribe-transcripts
+nix run . -- daemon --transcript-dir target/speaches-companion-transcripts
 ```
 
 The Nix flake build also enables the `debug-recordings` Cargo feature and wraps
@@ -156,7 +156,7 @@ The Nix flake build also enables the `debug-recordings` Cargo feature and wraps
 directory:
 
 ```sh
-nix run . -- daemon --record-dir target/speaches-scribe-recordings
+nix run . -- daemon --record-dir target/speaches-companion-recordings
 ```
 
 Plain Cargo builds keep `--record-dir` unavailable unless compiled with
@@ -181,7 +181,7 @@ silent audio buffer, commits it, and waits for a transcription completion event.
 
 ## Development
 
-`speaches-scribe` links to `libxdo`. On NixOS, plain `cargo run --` works when
+`speaches-companion` links to `libxdo`. On NixOS, plain `cargo run --` works when
 `xdotool` is installed in the current system profile; Sway injection also needs
 `swaymsg` and `wtype` in `PATH`. For a fully provisioned development
 environment, use the Nix shell:

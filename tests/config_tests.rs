@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use speaches_scribe::config::{
+use speaches_companion::config::{
     default_config_path_with_env, load_file_config_at, realtime_ws_url, resolve_config,
     resolve_config_path_with_env, resolve_tts_config, ConfigInput, TtsConfigInput,
     DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_TTS_MODEL, DEFAULT_TTS_PLAYER,
@@ -19,7 +19,7 @@ fn defaults_are_derived_from_cfg() {
     assert_eq!(config.duration_seconds, 10);
     assert!(config
         .trace_path
-        .starts_with("target/speaches-scribe-traces"));
+        .starts_with("target/speaches-companion-traces"));
 }
 
 #[test]
@@ -253,13 +253,13 @@ fn default_config_path_uses_xdg_then_home() {
 
     assert_eq!(
         default_config_path_with_env(&env).unwrap(),
-        PathBuf::from("/tmp/xdg/speaches-scribe/config.toml")
+        PathBuf::from("/tmp/xdg/speaches-companion/config.toml")
     );
 
     env.remove("XDG_CONFIG_HOME");
     assert_eq!(
         default_config_path_with_env(&env).unwrap(),
-        PathBuf::from("/home/example/.config/speaches-scribe/config.toml")
+        PathBuf::from("/home/example/.config/speaches-companion/config.toml")
     );
 }
 
@@ -267,7 +267,7 @@ fn default_config_path_uses_xdg_then_home() {
 fn config_path_prefers_cli_then_environment() {
     let mut env = BTreeMap::new();
     env.insert(
-        "SPEACHES_SCRIBE_CONFIG".to_string(),
+        "SPEACHES_COMPANION_CONFIG".to_string(),
         "/tmp/env-config.toml".to_string(),
     );
     env.insert("HOME".to_string(), "/home/example".to_string());

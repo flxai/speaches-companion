@@ -125,7 +125,7 @@ pub async fn write_speech_temp_file(
     }
 
     let path = std::env::temp_dir().join(format!(
-        "speaches-scribe-tts-{}-{}.{}",
+        "speaches-companion-tts-{}-{}.{}",
         std::process::id(),
         current_millis(),
         speech_file_extension(response_format)
@@ -225,9 +225,11 @@ fn playback_was_cancelled(status: ExitStatus) -> bool {
 fn default_playback_state() -> anyhow::Result<PlaybackState> {
     let dir = match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(runtime_dir) if !runtime_dir.is_empty() => {
-            PathBuf::from(runtime_dir).join("speaches-scribe")
+            PathBuf::from(runtime_dir).join("speaches-companion")
         }
-        _ => std::env::temp_dir().join(format!("speaches-scribe-{}", unsafe { libc::geteuid() })),
+        _ => {
+            std::env::temp_dir().join(format!("speaches-companion-{}", unsafe { libc::geteuid() }))
+        }
     };
     Ok(PlaybackState::in_dir(dir))
 }

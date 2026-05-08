@@ -1,6 +1,6 @@
 use httpmock::prelude::*;
-use speaches_scribe::config::DEFAULT_MODEL;
-use speaches_scribe::stt::{
+use speaches_companion::config::DEFAULT_MODEL;
+use speaches_companion::stt::{
     parse_streaming_transcript, transcribe_file, ResponseFormat, TranscribeOptions,
 };
 use tempfile::tempdir;

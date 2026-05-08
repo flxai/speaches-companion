@@ -4,25 +4,25 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::{ArgAction, Args, Parser, Subcommand};
-use speaches_scribe::audio::{record_wav_with_pw_record, STT_SAMPLE_RATE};
-use speaches_scribe::config::{
+use speaches_companion::audio::{record_wav_with_pw_record, STT_SAMPLE_RATE};
+use speaches_companion::config::{
     load_file_config, resolve_config, resolve_tts_config, ConfigInput, FileConfig, TtsConfig,
     TtsConfigInput,
 };
-use speaches_scribe::daemon::run_daemon;
-use speaches_scribe::inject::{DesktopTextInjector, TextInjector};
-use speaches_scribe::ipc::{default_socket_path, send_command, IpcCommand};
-use speaches_scribe::notification::{
+use speaches_companion::daemon::run_daemon;
+use speaches_companion::inject::{DesktopTextInjector, TextInjector};
+use speaches_companion::ipc::{default_socket_path, send_command, IpcCommand};
+use speaches_companion::notification::{
     DesktopErrorNotifier, ErrorNotifier, NoopErrorNotifier, NoopTranscriptNotifier,
     HOTKEY_ERROR_SUMMARY, READ_ALOUD_ERROR_SUMMARY,
 };
-use speaches_scribe::phase::PhaseResult;
-use speaches_scribe::realtime::{check_realtime, run_dictate_live, RealtimeTranscriber};
-use speaches_scribe::streaming::{
+use speaches_companion::phase::PhaseResult;
+use speaches_companion::realtime::{check_realtime, run_dictate_live, RealtimeTranscriber};
+use speaches_companion::streaming::{
     FinalHttpTranscriber, LiveTranscriber, StreamingDictationController,
 };
-use speaches_scribe::stt::{transcribe_file, ResponseFormat, TranscribeOptions};
-use speaches_scribe::tts::{
+use speaches_companion::stt::{transcribe_file, ResponseFormat, TranscribeOptions};
+use speaches_companion::tts::{
     normalize_read_aloud_text, play_audio_file, selected_or_clipboard_text, synthesize_speech,
     write_speech_temp_file, SpeechOptions,
 };
@@ -34,7 +34,7 @@ const DEFAULT_PREROLL_MS: u64 = 750;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "speaches-scribe",
+    name = "speaches-companion",
     about = "Speaches companion for Linux desktop dictation"
 )]
 struct Cli {
@@ -197,7 +197,10 @@ struct SmokeArgs {
     config: Option<PathBuf>,
     #[arg(long, default_value = "3")]
     record_seconds: u64,
-    #[arg(long, default_value = "target/speaches-scribe-smoke/speaches-mic.wav")]
+    #[arg(
+        long,
+        default_value = "target/speaches-companion-smoke/speaches-mic.wav"
+    )]
     record_output: PathBuf,
     #[arg(long)]
     base_url: Option<String>,
@@ -244,14 +247,14 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     let socket_path = args.socket_path.unwrap_or_else(default_socket_path);
     if let Some(transcript_dir) = daemon_settings.transcript_dir.as_ref() {
         eprintln!(
-            "speaches-scribe preserving transcripts in {}",
+            "speaches-companion preserving transcripts in {}",
             transcript_dir.display()
         );
     }
     #[cfg(feature = "debug-recordings")]
     if let Some(record_dir) = daemon_settings.record_dir.as_ref() {
         eprintln!(
-            "speaches-scribe preserving MP3 recordings in {}",
+            "speaches-companion preserving MP3 recordings in {}",
             record_dir.display()
         );
     }
@@ -272,7 +275,7 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
                 run_streaming_daemon(socket_path, daemon_settings, transcriber).await
             }
             Err(error) => {
-                eprintln!("speaches-scribe realtime startup failed: {error:#}");
+                eprintln!("speaches-companion realtime startup failed: {error:#}");
                 ExitCode::from(1)
             }
         }
@@ -294,16 +297,16 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
         .with_transcript_dir(daemon_settings.transcript_dir.clone());
         #[cfg(feature = "debug-recordings")]
         let transcriber = transcriber.with_record_dir(daemon_settings.record_dir.clone());
-        eprintln!("speaches-scribe starting continuous audio capture...");
+        eprintln!("speaches-companion starting continuous audio capture...");
         if let Err(error) = transcriber.prepare_capture().await {
-            eprintln!("speaches-scribe failed to start continuous audio capture: {error:#}");
+            eprintln!("speaches-companion failed to start continuous audio capture: {error:#}");
             return ExitCode::from(1);
         }
-        eprintln!("speaches-scribe continuous audio capture ready");
-        eprintln!("speaches-scribe warming transcription backend...");
+        eprintln!("speaches-companion continuous audio capture ready");
+        eprintln!("speaches-companion warming transcription backend...");
         match transcriber.warm_up_transcription().await {
-            Ok(()) => eprintln!("speaches-scribe transcription backend ready"),
-            Err(error) => eprintln!("speaches-scribe transcription warmup failed: {error:#}"),
+            Ok(()) => eprintln!("speaches-companion transcription backend ready"),
+            Err(error) => eprintln!("speaches-companion transcription warmup failed: {error:#}"),
         }
         run_streaming_daemon(socket_path, daemon_settings, transcriber).await
     }
@@ -330,18 +333,18 @@ async fn prepare_realtime_daemon_transcriber<T>(transcriber: T) -> anyhow::Resul
 where
     T: RealtimeDaemonStartup,
 {
-    eprintln!("speaches-scribe starting continuous audio capture...");
+    eprintln!("speaches-companion starting continuous audio capture...");
     transcriber
         .prepare_capture()
         .await
         .context("failed to start continuous audio capture")?;
-    eprintln!("speaches-scribe continuous audio capture ready");
-    eprintln!("speaches-scribe warming realtime transcription backend...");
+    eprintln!("speaches-companion continuous audio capture ready");
+    eprintln!("speaches-companion warming realtime transcription backend...");
     transcriber
         .warm_up()
         .await
         .context("realtime transcription backend is unavailable")?;
-    eprintln!("speaches-scribe realtime transcription backend ready");
+    eprintln!("speaches-companion realtime transcription backend ready");
     Ok(transcriber)
 }
 
@@ -366,13 +369,13 @@ where
     .with_append_space(daemon_settings.append_space);
 
     eprintln!(
-        "speaches-scribe daemon listening on {}",
+        "speaches-companion daemon listening on {}",
         socket_path.display()
     );
     match run_daemon(&socket_path, controller).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("speaches-scribe daemon failed: {error:#}");
+            eprintln!("speaches-companion daemon failed: {error:#}");
             ExitCode::from(1)
         }
     }
@@ -510,7 +513,7 @@ where
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("speaches-scribe hotkey failed: {error:#}");
+            eprintln!("speaches-companion hotkey failed: {error:#}");
             notify_hotkey_failure(&notifier, &error);
             ExitCode::from(1)
         }
@@ -523,7 +526,7 @@ where
 {
     let body = format!("{error:#}");
     if let Err(notify_error) = notifier.notify_error(HOTKEY_ERROR_SUMMARY, &body) {
-        eprintln!("speaches-scribe notification failed: {notify_error:#}");
+        eprintln!("speaches-companion notification failed: {notify_error:#}");
     }
 }
 
@@ -587,7 +590,7 @@ async fn read_aloud(text: Option<String>, config: TtsConfig) -> anyhow::Result<(
     let play_result = play_audio_file(&audio_path, &config.player, &config.player_args).await;
     if let Err(error) = tokio::fs::remove_file(&audio_path).await {
         eprintln!(
-            "speaches-scribe failed to remove temporary speech audio {}: {error:#}",
+            "speaches-companion failed to remove temporary speech audio {}: {error:#}",
             audio_path.display()
         );
     }
@@ -600,7 +603,7 @@ where
 {
     let body = format!("{error:#}");
     if let Err(notify_error) = notifier.notify_error(READ_ALOUD_ERROR_SUMMARY, &body) {
-        eprintln!("speaches-scribe notification failed: {notify_error:#}");
+        eprintln!("speaches-companion notification failed: {notify_error:#}");
     }
 }
 
@@ -617,16 +620,16 @@ async fn run_realtime_check_command(args: RealtimeCheckArgs) -> ExitCode {
     ));
 
     eprintln!(
-        "speaches-scribe checking Speaches health at {}",
+        "speaches-companion checking Speaches health at {}",
         config.base_url
     );
     match check_realtime(&config.base_url, &config.model, config.language.as_deref()).await {
         Ok(()) => {
-            eprintln!("speaches-scribe realtime websocket ready");
+            eprintln!("speaches-companion realtime websocket ready");
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("speaches-scribe realtime check failed: {error:#}");
+            eprintln!("speaches-companion realtime check failed: {error:#}");
             ExitCode::from(1)
         }
     }
@@ -684,10 +687,10 @@ fn stt_config_input(
         cli_model,
         cli_language,
         env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
-        env_model: std::env::var("SPEACHES_SCRIBE_MODEL")
+        env_model: std::env::var("SPEACHES_COMPANION_MODEL")
             .ok()
             .or_else(|| std::env::var("SPEACHES_STT_MODEL").ok()),
-        env_language: std::env::var("SPEACHES_SCRIBE_LANGUAGE").ok(),
+        env_language: std::env::var("SPEACHES_COMPANION_LANGUAGE").ok(),
         file_base_url: file_config.speaches.base_url.clone(),
         file_model: file_config.stt.model.clone(),
         file_language: file_config.stt.language.clone(),
@@ -715,16 +718,16 @@ fn tts_config_input(cli: TtsCliConfigInput, file_config: &FileConfig) -> TtsConf
         cli_player: cli.player,
         cli_player_args: cli.player_args,
         env_base_url: std::env::var("SPEACHES_BASE_URL").ok(),
-        env_model: env_or("SPEACHES_SCRIBE_TTS_MODEL", "SPEACHES_TTS_MODEL"),
-        env_voice: env_or("SPEACHES_SCRIBE_TTS_VOICE", "SPEACHES_TTS_VOICE"),
-        env_speed: env_speed_or("SPEACHES_SCRIBE_TTS_SPEED", "SPEACHES_TTS_SPEED"),
+        env_model: env_or("SPEACHES_COMPANION_TTS_MODEL", "SPEACHES_TTS_MODEL"),
+        env_voice: env_or("SPEACHES_COMPANION_TTS_VOICE", "SPEACHES_TTS_VOICE"),
+        env_speed: env_speed_or("SPEACHES_COMPANION_TTS_SPEED", "SPEACHES_TTS_SPEED"),
         env_response_format: env_or(
-            "SPEACHES_SCRIBE_TTS_RESPONSE_FORMAT",
+            "SPEACHES_COMPANION_TTS_RESPONSE_FORMAT",
             "SPEACHES_TTS_RESPONSE_FORMAT",
         ),
-        env_player: env_or("SPEACHES_SCRIBE_TTS_PLAYER", "SPEACHES_TTS_PLAYER"),
+        env_player: env_or("SPEACHES_COMPANION_TTS_PLAYER", "SPEACHES_TTS_PLAYER"),
         env_player_args: env_args_or(
-            "SPEACHES_SCRIBE_TTS_PLAYER_ARGS",
+            "SPEACHES_COMPANION_TTS_PLAYER_ARGS",
             "SPEACHES_TTS_PLAYER_ARGS",
         ),
         file_base_url: file_config.speaches.base_url.clone(),
@@ -846,12 +849,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use speaches_scribe::config::DictationFileConfig;
+    use speaches_companion::config::DictationFileConfig;
 
     #[tokio::test]
     async fn hotkey_connection_error_sends_desktop_error_notification() {
         let socket_path = std::env::temp_dir().join(format!(
-            "speaches-scribe-missing-hotkey-{}.sock",
+            "speaches-companion-missing-hotkey-{}.sock",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&socket_path);
@@ -873,7 +876,7 @@ mod tests {
         assert_eq!(notifications[0].0, HOTKEY_ERROR_SUMMARY);
         assert!(notifications[0]
             .1
-            .contains("failed to connect to speaches-scribe daemon"));
+            .contains("failed to connect to speaches-companion daemon"));
         assert!(notifications[0]
             .1
             .contains(&socket_path.display().to_string()));
@@ -881,7 +884,7 @@ mod tests {
 
     #[test]
     fn daemon_defaults_insert_marker_and_live_partials() {
-        let args = parse_daemon_args(["speaches-scribe", "daemon"]);
+        let args = parse_daemon_args(["speaches-companion", "daemon"]);
         let settings = resolve_daemon_settings(&args, &FileConfig::default());
 
         assert!(!settings.realtime_partials);
@@ -897,22 +900,22 @@ mod tests {
 
     #[test]
     fn daemon_flags_can_disable_marker_and_live_partials() {
-        let args = parse_daemon_args(["speaches-scribe", "daemon", "--no-listening-marker"]);
+        let args = parse_daemon_args(["speaches-companion", "daemon", "--no-listening-marker"]);
         let settings = resolve_daemon_settings(&args, &FileConfig::default());
         assert_eq!(settings.listening_marker, None);
 
-        let args = parse_daemon_args(["speaches-scribe", "daemon", "--no-inline-partials"]);
+        let args = parse_daemon_args(["speaches-companion", "daemon", "--no-inline-partials"]);
         let settings = resolve_daemon_settings(&args, &FileConfig::default());
         assert!(!settings.inline_partials);
 
-        let args = parse_daemon_args(["speaches-scribe", "daemon", "--no-append-space"]);
+        let args = parse_daemon_args(["speaches-companion", "daemon", "--no-append-space"]);
         let settings = resolve_daemon_settings(&args, &FileConfig::default());
         assert!(!settings.append_space);
     }
 
     #[test]
     fn daemon_reads_dictation_settings_from_file_config() {
-        let args = parse_daemon_args(["speaches-scribe", "daemon"]);
+        let args = parse_daemon_args(["speaches-companion", "daemon"]);
         let file_config = FileConfig {
             dictation: DictationFileConfig {
                 transcript_dir: Some(PathBuf::from("transcripts")),
@@ -949,7 +952,7 @@ mod tests {
 
     #[test]
     fn daemon_can_disable_stream_response_from_file_config() {
-        let args = parse_daemon_args(["speaches-scribe", "daemon", "--no-stream-response"]);
+        let args = parse_daemon_args(["speaches-companion", "daemon", "--no-stream-response"]);
         let file_config = FileConfig {
             dictation: DictationFileConfig {
                 stream_response: Some(true),
@@ -965,7 +968,7 @@ mod tests {
 
     #[test]
     fn daemon_can_disable_realtime_partials_from_file_config() {
-        let args = parse_daemon_args(["speaches-scribe", "daemon", "--no-realtime-partials"]);
+        let args = parse_daemon_args(["speaches-companion", "daemon", "--no-realtime-partials"]);
         let file_config = FileConfig {
             dictation: DictationFileConfig {
                 realtime_partials: Some(true),
@@ -981,7 +984,7 @@ mod tests {
 
     #[test]
     fn daemon_can_disable_final_pass_from_file_config() {
-        let args = parse_daemon_args(["speaches-scribe", "daemon", "--no-final-pass"]);
+        let args = parse_daemon_args(["speaches-companion", "daemon", "--no-final-pass"]);
         let file_config = FileConfig {
             dictation: DictationFileConfig {
                 final_pass: Some(true),
@@ -1022,7 +1025,7 @@ mod tests {
 
     #[test]
     fn daemon_accepts_custom_listening_marker() {
-        let args = parse_daemon_args(["speaches-scribe", "daemon", "--listening-marker", "..."]);
+        let args = parse_daemon_args(["speaches-companion", "daemon", "--listening-marker", "..."]);
         let settings = resolve_daemon_settings(&args, &FileConfig::default());
 
         assert_eq!(settings.listening_marker, Some("...".to_string()));
@@ -1031,7 +1034,7 @@ mod tests {
 
     #[test]
     fn daemon_accepts_custom_preroll() {
-        let args = parse_daemon_args(["speaches-scribe", "daemon", "--preroll-ms", "1000"]);
+        let args = parse_daemon_args(["speaches-companion", "daemon", "--preroll-ms", "1000"]);
         let settings = resolve_daemon_settings(&args, &FileConfig::default());
 
         assert_eq!(args.preroll_ms, Some(1_000));
@@ -1041,7 +1044,7 @@ mod tests {
     #[test]
     fn daemon_accepts_custom_injection_delay() {
         let args = parse_daemon_args([
-            "speaches-scribe",
+            "speaches-companion",
             "daemon",
             "--inject-delay-microsecs",
             "3000",
@@ -1054,15 +1057,15 @@ mod tests {
     #[test]
     fn daemon_accepts_transcript_dir() {
         let args = parse_daemon_args([
-            "speaches-scribe",
+            "speaches-companion",
             "daemon",
             "--transcript-dir",
-            "target/speaches-scribe-debug",
+            "target/speaches-companion-debug",
         ]);
 
         assert_eq!(
             args.transcript_dir,
-            Some(PathBuf::from("target/speaches-scribe-debug"))
+            Some(PathBuf::from("target/speaches-companion-debug"))
         );
     }
 
@@ -1070,20 +1073,20 @@ mod tests {
     #[test]
     fn daemon_accepts_record_dir() {
         let args = parse_daemon_args([
-            "speaches-scribe",
+            "speaches-companion",
             "daemon",
             "--record-dir",
-            "target/speaches-scribe-recordings",
+            "target/speaches-companion-recordings",
         ]);
         let settings = resolve_daemon_settings(&args, &FileConfig::default());
 
         assert_eq!(
             args.record_dir,
-            Some(PathBuf::from("target/speaches-scribe-recordings"))
+            Some(PathBuf::from("target/speaches-companion-recordings"))
         );
         assert_eq!(
             settings.record_dir,
-            Some(PathBuf::from("target/speaches-scribe-recordings"))
+            Some(PathBuf::from("target/speaches-companion-recordings"))
         );
     }
 
@@ -1091,10 +1094,10 @@ mod tests {
     #[test]
     fn daemon_rejects_record_dir() {
         assert!(Cli::try_parse_from([
-            "speaches-scribe",
+            "speaches-companion",
             "daemon",
             "--record-dir",
-            "target/speaches-scribe-debug"
+            "target/speaches-companion-debug"
         ])
         .is_err());
     }
@@ -1102,7 +1105,7 @@ mod tests {
     #[test]
     fn read_aloud_accepts_text_and_tts_options() {
         match Cli::parse_from([
-            "speaches-scribe",
+            "speaches-companion",
             "read-aloud",
             "--text",
             "read this",
@@ -1139,7 +1142,7 @@ mod tests {
     #[test]
     fn realtime_check_accepts_stt_options() {
         match Cli::parse_from([
-            "speaches-scribe",
+            "speaches-companion",
             "realtime-check",
             "--base-url",
             "http://speaches.example:8000",

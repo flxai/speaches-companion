@@ -1,4 +1,4 @@
-use speaches_scribe::audio::write_pcm_wav;
+use speaches_companion::audio::write_pcm_wav;
 use tempfile::tempdir;
 
 #[tokio::test]

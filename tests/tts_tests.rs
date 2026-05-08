@@ -1,5 +1,5 @@
 use httpmock::prelude::*;
-use speaches_scribe::tts::{
+use speaches_companion::tts::{
     normalize_read_aloud_text, play_audio_file_with_state, speech_url, synthesize_speech,
     PlaybackState, SpeechOptions,
 };

@@ -472,7 +472,7 @@ where
     V: TranscriptNotifier,
 {
     if let Err(error) = notify(notifier) {
-        eprintln!("speaches-scribe transcript notification failed: {error:#}");
+        eprintln!("speaches-companion transcript notification failed: {error:#}");
     }
 }
 
@@ -481,9 +481,9 @@ where
     N: ErrorNotifier,
 {
     let body = dictation_error_body(stage, error);
-    eprintln!("speaches-scribe dictation failed: {body}");
+    eprintln!("speaches-companion dictation failed: {body}");
     if let Err(notify_error) = notifier.notify_error(DICTATION_ERROR_SUMMARY, &body) {
-        eprintln!("speaches-scribe notification failed: {notify_error:#}");
+        eprintln!("speaches-companion notification failed: {notify_error:#}");
     }
 }
 
@@ -587,7 +587,7 @@ impl LiveTranscriber for FinalHttpTranscriber {
         let session_pcm =
             StreamingPcmSession::start(shared_pcm, self.sample_rate, self.preroll).await?;
         eprintln!(
-            "speaches-scribe hotkey-down audio buffer: {:.2}s available; retained {:.2}s pre-roll (requested {}ms)",
+            "speaches-companion hotkey-down audio buffer: {:.2}s available; retained {:.2}s pre-roll (requested {}ms)",
             pcm_duration(self.sample_rate, session_pcm.available_at_start_bytes()).as_secs_f64(),
             pcm_duration(self.sample_rate, session_pcm.retained_preroll_bytes()).as_secs_f64(),
             self.preroll.as_millis()
@@ -611,22 +611,22 @@ impl LiveTranscriber for FinalHttpTranscriber {
             match preserve_recording_snapshot(record_dir, &raw_pcm, self.sample_rate, "final").await
             {
                 Ok(path) => eprintln!(
-                    "speaches-scribe preserved MP3 recording at {}",
+                    "speaches-companion preserved MP3 recording at {}",
                     path.display()
                 ),
                 Err(error) => {
-                    eprintln!("speaches-scribe failed to preserve MP3 recording: {error:#}")
+                    eprintln!("speaches-companion failed to preserve MP3 recording: {error:#}")
                 }
             }
         }
         let final_audio = build_final_transcription_audio(self.sample_rate, &raw_pcm);
         eprintln!(
-            "speaches-scribe final audio snapshot: {:.2}s raw including up to {}ms debug pre-roll",
+            "speaches-companion final audio snapshot: {:.2}s raw including up to {}ms debug pre-roll",
             pcm_duration(self.sample_rate, raw_pcm.len()).as_secs_f64(),
             self.preroll.as_millis()
         );
         eprintln!(
-            "speaches-scribe final audio sent: {:.2}s after trimming {:.2}s leading / {:.2}s trailing ({:.2}s detected trailing silence)",
+            "speaches-companion final audio sent: {:.2}s after trimming {:.2}s leading / {:.2}s trailing ({:.2}s detected trailing silence)",
             final_audio.audio_duration.as_secs_f64(),
             final_audio.leading_trim.as_secs_f64(),
             final_audio.trailing_trim.as_secs_f64(),
@@ -644,11 +644,11 @@ impl LiveTranscriber for FinalHttpTranscriber {
         if let Some(transcript_dir) = self.transcript_dir.as_deref() {
             match preserve_transcript_snapshot(transcript_dir, &transcript, "final").await {
                 Ok(path) => eprintln!(
-                    "speaches-scribe preserved final transcript at {}",
+                    "speaches-companion preserved final transcript at {}",
                     path.display()
                 ),
                 Err(error) => {
-                    eprintln!("speaches-scribe failed to preserve final transcript: {error:#}")
+                    eprintln!("speaches-companion failed to preserve final transcript: {error:#}")
                 }
             }
         }
@@ -850,7 +850,7 @@ pub async fn preserve_recording_snapshot(
 fn transcript_file_name(label: &str) -> String {
     let counter = TEMP_AUDIO_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!(
-        "speaches-scribe-{label}-{}-{counter}.txt",
+        "speaches-companion-{label}-{}-{counter}.txt",
         std::process::id()
     )
 }
@@ -859,7 +859,7 @@ fn transcript_file_name(label: &str) -> String {
 fn recording_file_name(label: &str) -> String {
     let counter = TEMP_AUDIO_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!(
-        "speaches-scribe-{label}-{}-{counter}.mp3",
+        "speaches-companion-{label}-{}-{counter}.mp3",
         std::process::id()
     )
 }
@@ -867,7 +867,7 @@ fn recording_file_name(label: &str) -> String {
 fn audio_file_name(label: &str) -> String {
     let counter = TEMP_AUDIO_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!(
-        "speaches-scribe-{label}-{}-{counter}.wav",
+        "speaches-companion-{label}-{}-{counter}.wav",
         std::process::id()
     )
 }
@@ -959,7 +959,7 @@ mod tests {
     fn recording_snapshot_names_use_mp3_extension() {
         let name = recording_file_name("realtime");
 
-        assert!(name.starts_with("speaches-scribe-realtime-"));
+        assert!(name.starts_with("speaches-companion-realtime-"));
         assert!(name.ends_with(".mp3"));
     }
 

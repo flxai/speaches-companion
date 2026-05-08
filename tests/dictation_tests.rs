@@ -2,17 +2,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use speaches_scribe::daemon::{DaemonResponse, HotkeyHandler};
-use speaches_scribe::dictation::{DictationController, Recorder, Transcriber};
-use speaches_scribe::inject::{
+use speaches_companion::daemon::{DaemonResponse, HotkeyHandler};
+use speaches_companion::dictation::{DictationController, Recorder, Transcriber};
+use speaches_companion::inject::{
     format_transcript_for_injection, normalize_transcript_for_injection, TextInjector,
 };
-use speaches_scribe::ipc::IpcCommand;
-use speaches_scribe::notification::{ErrorNotifier, DICTATION_ERROR_SUMMARY};
+use speaches_companion::ipc::IpcCommand;
+use speaches_companion::notification::{ErrorNotifier, DICTATION_ERROR_SUMMARY};
 
 #[tokio::test]
 async fn hotkey_up_records_transcribes_and_injects_text() {
-    let recorder = FakeRecorder::new(PathBuf::from("/tmp/speaches-scribe-test.wav"));
+    let recorder = FakeRecorder::new(PathBuf::from("/tmp/speaches-companion-test.wav"));
     let transcriber = FakeTranscriber::new("  hello window\n");
     let injector = FakeInjector::default();
     let injected = injector.injected.clone();
@@ -42,14 +42,14 @@ async fn hotkey_up_records_transcribes_and_injects_text() {
     assert_eq!(*stops.lock().unwrap(), 1);
     assert_eq!(
         *transcribed_paths.lock().unwrap(),
-        vec![PathBuf::from("/tmp/speaches-scribe-test.wav")]
+        vec![PathBuf::from("/tmp/speaches-companion-test.wav")]
     );
     assert_eq!(*injected.lock().unwrap(), vec!["hello window ".to_string()]);
 }
 
 #[tokio::test]
 async fn trailing_space_can_be_disabled() {
-    let recorder = FakeRecorder::new(PathBuf::from("/tmp/speaches-scribe-test.wav"));
+    let recorder = FakeRecorder::new(PathBuf::from("/tmp/speaches-companion-test.wav"));
     let injector = FakeInjector::default();
     let injected = injector.injected.clone();
     let mut controller =
@@ -70,7 +70,7 @@ async fn trailing_space_can_be_disabled() {
 
 #[tokio::test]
 async fn repeated_down_does_not_start_second_recording() {
-    let recorder = FakeRecorder::new(PathBuf::from("/tmp/speaches-scribe-test.wav"));
+    let recorder = FakeRecorder::new(PathBuf::from("/tmp/speaches-companion-test.wav"));
     let starts = recorder.starts.clone();
     let mut controller = DictationController::new(
         recorder,
@@ -98,7 +98,7 @@ async fn repeated_down_does_not_start_second_recording() {
 
 #[tokio::test]
 async fn up_while_idle_is_a_noop() {
-    let recorder = FakeRecorder::new(PathBuf::from("/tmp/speaches-scribe-test.wav"));
+    let recorder = FakeRecorder::new(PathBuf::from("/tmp/speaches-companion-test.wav"));
     let stops = recorder.stops.clone();
     let injector = FakeInjector::default();
     let injected = injector.injected.clone();
@@ -119,7 +119,7 @@ async fn up_while_idle_is_a_noop() {
 
 #[tokio::test]
 async fn empty_transcript_does_not_inject_text() {
-    let recorder = FakeRecorder::new(PathBuf::from("/tmp/speaches-scribe-test.wav"));
+    let recorder = FakeRecorder::new(PathBuf::from("/tmp/speaches-companion-test.wav"));
     let injector = FakeInjector::default();
     let injected = injector.injected.clone();
     let mut controller =
@@ -145,7 +145,7 @@ async fn empty_transcript_does_not_inject_text() {
 
 #[tokio::test]
 async fn transcription_error_notifies_and_does_not_inject_text() {
-    let recorder = FakeRecorder::new(PathBuf::from("/tmp/speaches-scribe-test.wav"));
+    let recorder = FakeRecorder::new(PathBuf::from("/tmp/speaches-companion-test.wav"));
     let transcriber = FakeTranscriber::failing("connection refused");
     let injector = FakeInjector::default();
     let injected = injector.injected.clone();
