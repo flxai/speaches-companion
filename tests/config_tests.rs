@@ -177,6 +177,7 @@ final_pass = false
 listening_marker = "..."
 inline_partials = false
 append_space = false
+inject_delay_microsecs = 3000
 leading_silence_ms = 400
 preroll_ms = 1000
 "#,
@@ -207,6 +208,7 @@ preroll_ms = 1000
     assert_eq!(config.dictation.listening_marker.as_deref(), Some("..."));
     assert_eq!(config.dictation.inline_partials, Some(false));
     assert_eq!(config.dictation.append_space, Some(false));
+    assert_eq!(config.dictation.inject_delay_microsecs, Some(3_000));
     assert_eq!(config.dictation.leading_silence_ms, Some(400));
     assert_eq!(config.dictation.preroll_ms, Some(1000));
 }

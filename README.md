@@ -70,6 +70,7 @@ final_pass = false
 listening_marker = "💬"
 inline_partials = true
 append_space = true
+inject_delay_microsecs = 3000
 leading_silence_ms = 250
 preroll_ms = 750
 ```
@@ -108,6 +109,9 @@ recording starts, treat the listening marker as the ready-to-speak signal.
 Text payloads are injected through Sway/wtype when a Sway IPC socket is
 available, otherwise through libxdo text entry with active modifiers temporarily
 cleared. Speculative replacement uses Backspace for the portion that changed.
+Some browser text fields drop characters when virtual keyboard events arrive
+too quickly; set `inject_delay_microsecs` or pass `--inject-delay-microsecs` to
+add a per-key delay.
 
 Inline partial injection is enabled by default. If the trigger binding keeps a
 modifier physically held while dictating, such as some i3 `$sup+d` bindings,

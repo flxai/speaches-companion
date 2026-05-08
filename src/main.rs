@@ -28,6 +28,7 @@ use speaches_scribe::tts::{
 };
 
 const DEFAULT_LISTENING_MARKER: &str = "💬";
+const DEFAULT_INJECT_DELAY_MICROSECS: u32 = 0;
 const DEFAULT_LEADING_SILENCE_MS: u64 = 250;
 const DEFAULT_PREROLL_MS: u64 = 750;
 
@@ -94,6 +95,8 @@ struct DaemonArgs {
     append_space: bool,
     #[arg(long)]
     no_append_space: bool,
+    #[arg(long)]
+    inject_delay_microsecs: Option<u32>,
     #[arg(long)]
     leading_silence_ms: Option<u64>,
     #[arg(long)]
@@ -350,7 +353,7 @@ async fn run_streaming_daemon<L>(
 where
     L: LiveTranscriber + 'static,
 {
-    let injector = DesktopTextInjector::default();
+    let injector = DesktopTextInjector::new(daemon_settings.inject_delay_microsecs);
     let controller = StreamingDictationController::new_with_notifiers(
         transcriber,
         injector,
@@ -386,6 +389,7 @@ struct DaemonSettings {
     listening_marker: Option<String>,
     inline_partials: bool,
     append_space: bool,
+    inject_delay_microsecs: u32,
     leading_silence_ms: u64,
     preroll_ms: u64,
 }
@@ -407,6 +411,10 @@ fn resolve_daemon_settings(args: &DaemonArgs, file_config: &FileConfig) -> Daemo
         listening_marker: resolve_listening_marker(args, file_config),
         inline_partials: resolve_inline_partials(args, file_config),
         append_space: resolve_append_space(args, file_config),
+        inject_delay_microsecs: args
+            .inject_delay_microsecs
+            .or(file_config.dictation.inject_delay_microsecs)
+            .unwrap_or(DEFAULT_INJECT_DELAY_MICROSECS),
         leading_silence_ms: args
             .leading_silence_ms
             .or(file_config.dictation.leading_silence_ms)
@@ -916,6 +924,7 @@ mod tests {
                 listening_marker: Some("...".to_string()),
                 inline_partials: Some(false),
                 append_space: Some(false),
+                inject_delay_microsecs: Some(3_000),
                 leading_silence_ms: Some(400),
                 preroll_ms: Some(1_000),
             },
@@ -933,6 +942,7 @@ mod tests {
         assert_eq!(settings.listening_marker, Some("...".to_string()));
         assert!(!settings.inline_partials);
         assert!(!settings.append_space);
+        assert_eq!(settings.inject_delay_microsecs, 3_000);
         assert_eq!(settings.leading_silence_ms, 400);
         assert_eq!(settings.preroll_ms, 1_000);
     }
@@ -1026,6 +1036,19 @@ mod tests {
 
         assert_eq!(args.preroll_ms, Some(1_000));
         assert_eq!(settings.preroll_ms, 1_000);
+    }
+
+    #[test]
+    fn daemon_accepts_custom_injection_delay() {
+        let args = parse_daemon_args([
+            "speaches-scribe",
+            "daemon",
+            "--inject-delay-microsecs",
+            "3000",
+        ]);
+        let settings = resolve_daemon_settings(&args, &FileConfig::default());
+
+        assert_eq!(settings.inject_delay_microsecs, 3_000);
     }
 
     #[test]
