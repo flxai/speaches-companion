@@ -354,12 +354,6 @@ impl SwayTextInjector {
             return Ok(false);
         }
 
-        let benefits_from_paste =
-            text_suffix.chars().count() > 4 || text_suffix.chars().any(char::is_whitespace);
-        if !benefits_from_paste {
-            return Ok(false);
-        }
-
         Ok(!self.focused_target_is_terminal()?)
     }
 
@@ -438,8 +432,28 @@ impl SwayTextInjector {
     }
 
     fn copy_text_to_clipboard(&self, text: &[u8]) -> anyhow::Result<()> {
+        let mut last_error = None;
+        for attempt in 0..3 {
+            match self.copy_text_to_clipboard_once(text) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt < 2 {
+                        thread::sleep(Duration::from_millis(25 * (attempt + 1) as u64));
+                    }
+                }
+            }
+        }
+
+        Err(last_error.expect("copy attempts should record last error"))
+    }
+
+    fn copy_text_to_clipboard_once(&self, text: &[u8]) -> anyhow::Result<()> {
         let mut command = self.wl_copy_command();
-        command.args(["--type", "text/plain"]).stdin(Stdio::piped());
+        command
+            .args(["--type", "text/plain"])
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped());
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to start {}", self.wl_copy_path.display()))?;
@@ -448,9 +462,12 @@ impl SwayTextInjector {
             .write_all(text)
             .context("failed to send text to wl-copy")?;
         drop(stdin);
-        let status = child.wait().context("failed to wait for wl-copy")?;
-        if !status.success() {
-            bail!("wl-copy failed with status {status}");
+        let output = child
+            .wait_with_output()
+            .context("failed to wait for wl-copy")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("wl-copy failed with status {}: {stderr}", output.status);
         }
         Ok(())
     }
@@ -474,7 +491,7 @@ impl SwayTextInjector {
     }
 
     fn wait_for_paste_delivery(&self) {
-        let delay = u64::from(self.delay_millis.max(50));
+        let delay = u64::from(self.delay_millis.max(120));
         thread::sleep(Duration::from_millis(delay));
     }
 
