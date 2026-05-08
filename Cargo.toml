@@ -2,6 +2,7 @@
 name = "speaches-companion"
 version = "0.3.0"
 edition = "2021"
+description = "Speaches Companion lets you type what you speak and read what you mark through Speaches."
 
 [features]
 debug-recordings = []

@@ -1,14 +1,15 @@
-# speaches-companion
+# Speaches Companion
 
-Linux desktop dictation for Speaches.
+Type what you speak. Read what you mark.
 
-`speaches-companion` is the desktop twin to
-[Speaches](https://github.com/speaches-ai/speaches): Speaches runs the speech
-service, and `speaches-companion` captures microphone audio, sends it to Speaches
-for STT, injects the transcript into the focused X11 window, and can send
-selected text to Speaches TTS for read-aloud playback. It is not a standalone
-speech engine and only works in conjunction with a running Speaches-compatible
-server.
+Speaches Companion is the desktop client for
+[Speaches](https://github.com/speaches-ai/speaches). It captures microphone
+audio, sends it to Speaches for STT, types the transcript into the focused app,
+and reads marked text back through Speaches TTS. It is not a standalone speech
+engine and only works in conjunction with a running Speaches-compatible server.
+
+The product name is Speaches Companion. The binary, flake app, config
+directory, and related identifiers remain `speaches-companion`.
 
 The Nix flake is the primary interface. It builds the `speaches-companion` binary,
 wraps it with the required PipeWire and X11 selection helpers, and exposes the
@@ -81,9 +82,10 @@ built-in defaults. `SPEACHES_BASE_URL`, `SPEACHES_COMPANION_MODEL`, and
 `SPEACHES_COMPANION_LANGUAGE` configure STT; the legacy `SPEACHES_STT_MODEL` is
 still accepted as a model fallback.
 
-Read-aloud uses Speaches' OpenAI-compatible `/v1/audio/speech` endpoint. Without
-`--text`, it reads the X11 primary selection and falls back to the clipboard,
-then plays the returned audio with `pw-play`. Configure TTS with
+Read-aloud uses Speaches' OpenAI-compatible `/v1/audio/speech` endpoint.
+Without `--text`, it reads marked text from the X11 primary selection and falls
+back to the clipboard, then plays the returned audio with `pw-play`. Configure
+TTS with
 `SPEACHES_COMPANION_TTS_MODEL`, `SPEACHES_COMPANION_TTS_VOICE`, and
 `SPEACHES_COMPANION_TTS_RESPONSE_FORMAT`, or the matching TOML and CLI values.
 Use `--speed`, `SPEACHES_COMPANION_TTS_SPEED`, or `tts.speed` to adjust speech

@@ -35,7 +35,7 @@ const DEFAULT_PREROLL_MS: u64 = 750;
 #[derive(Debug, Parser)]
 #[command(
     name = "speaches-companion",
-    about = "Speaches companion for Linux desktop dictation"
+    about = "Speaches Companion for typing what you speak and reading what you mark"
 )]
 struct Cli {
     #[command(subcommand)]

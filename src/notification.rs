@@ -1,10 +1,10 @@
 use notify_rust::{Notification, Timeout, Urgency};
 
-pub const DICTATION_ERROR_SUMMARY: &str = "speaches-companion dictation failed";
-pub const DICTATION_PARTIAL_SUMMARY: &str = "speaches-companion dictating";
-pub const DICTATION_FINAL_SUMMARY: &str = "speaches-companion dictation";
-pub const HOTKEY_ERROR_SUMMARY: &str = "speaches-companion hotkey failed";
-pub const READ_ALOUD_ERROR_SUMMARY: &str = "speaches-companion read-aloud failed";
+pub const DICTATION_ERROR_SUMMARY: &str = "Speaches Companion dictation failed";
+pub const DICTATION_PARTIAL_SUMMARY: &str = "Speaches Companion dictating";
+pub const DICTATION_FINAL_SUMMARY: &str = "Speaches Companion dictation";
+pub const HOTKEY_ERROR_SUMMARY: &str = "Speaches Companion hotkey failed";
+pub const READ_ALOUD_ERROR_SUMMARY: &str = "Speaches Companion read-aloud failed";
 const TRANSCRIPT_NOTIFICATION_ID: u32 = 0x7472_6563;
 
 pub trait ErrorNotifier: Send + Sync {
@@ -26,7 +26,7 @@ pub struct DesktopErrorNotifier;
 impl ErrorNotifier for DesktopErrorNotifier {
     fn notify_error(&self, summary: &str, body: &str) -> anyhow::Result<()> {
         Notification::new()
-            .appname("speaches-companion")
+            .appname("Speaches Companion")
             .summary(summary)
             .body(body)
             .urgency(Urgency::Critical)
@@ -93,7 +93,7 @@ impl TranscriptNotifier for DesktopTranscriptNotifier {
 
 fn show_transcript_notification(summary: &str, body: &str, timeout: Timeout) -> anyhow::Result<()> {
     Notification::new()
-        .appname("speaches-companion")
+        .appname("Speaches Companion")
         .id(TRANSCRIPT_NOTIFICATION_ID)
         .summary(summary)
         .body(body)
