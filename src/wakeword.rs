@@ -782,7 +782,7 @@ pub async fn wait_for_wake<S>(
 where
     S: WakeScorer,
 {
-    let mut cursor = 0usize;
+    let mut cursor = snapshot_streaming_pcm(shared_pcm).await.bytes_seen;
     loop {
         let snapshot = snapshot_streaming_pcm(shared_pcm).await;
         let buffer_start = snapshot.bytes_seen.saturating_sub(snapshot.pcm.len());
@@ -948,7 +948,9 @@ fn unix_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::{append_test_streaming_pcm, new_test_shared_pcm_buffer};
     use tempfile::tempdir;
+    use tokio::time::Instant;
 
     #[derive(Debug)]
     struct FakeScorer {
@@ -1021,6 +1023,41 @@ mod tests {
             detector.observe_pcm(&[0; 64]).unwrap(),
             Some(WakeDetection { score: 0.8 })
         );
+    }
+
+    #[tokio::test]
+    async fn wait_for_wake_ignores_retained_audio_from_before_the_call() {
+        let shared_pcm = new_test_shared_pcm_buffer(STT_SAMPLE_RATE, Duration::from_secs(5));
+        append_test_streaming_pcm(&shared_pcm, &[0; 64]).await;
+
+        let delayed_pcm = shared_pcm.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(100)).await;
+            append_test_streaming_pcm(&delayed_pcm, &[0; 64]).await;
+        });
+
+        let scorer = FakeScorer { scores: vec![0.9] };
+        let mut detector = WakeDetector::new(scorer, 0.5, Duration::from_millis(1));
+        let settings = WakewordSettings {
+            name: "default".to_string(),
+            engine: WakewordEngine::Openwakeword,
+            stock_model: DEFAULT_OPENWAKEWORD_STOCK_MODEL,
+            assets_dir: None,
+            root_dir: PathBuf::from("/tmp/wakewords"),
+            threshold: DEFAULT_WAKEWORD_THRESHOLD,
+            frame: Duration::from_millis(1),
+            silence_timeout: Duration::from_millis(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS),
+            activation_grace: Duration::from_millis(DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS),
+            max_recording: Duration::from_millis(DEFAULT_WAKEWORD_MAX_RECORDING_MS),
+        };
+
+        let started = Instant::now();
+        let detection = wait_for_wake(&shared_pcm, &mut detector, &settings)
+            .await
+            .unwrap();
+
+        assert_eq!(detection, WakeDetection { score: 0.9 });
+        assert!(started.elapsed() >= Duration::from_millis(80));
     }
 
     #[test]

@@ -186,6 +186,19 @@ pub async fn snapshot_streaming_pcm(pcm: &SharedPcmBuffer) -> StreamingPcmSnapsh
     }
 }
 
+#[cfg(test)]
+pub fn new_test_shared_pcm_buffer(sample_rate: u32, idle_retain: Duration) -> SharedPcmBuffer {
+    Arc::new(Mutex::new(StreamingPcmBuffer::new(
+        sample_rate,
+        idle_retain,
+    )))
+}
+
+#[cfg(test)]
+pub async fn append_test_streaming_pcm(pcm: &SharedPcmBuffer, chunk: &[u8]) {
+    pcm.lock().await.append(chunk);
+}
+
 pub async fn capture_with_pw_record<F, Fut>(duration: Duration, mut on_chunk: F) -> Result<usize>
 where
     F: FnMut(Vec<u8>) -> Fut,
