@@ -71,7 +71,7 @@
           ];
           postInstall = ''
             wrapProgram "$out/bin/speaches-companion" \
-              --prefix PATH : ${lib.makeBinPath [pkgs.ffmpeg pkgs.pipewire pkgs.sway pkgs.wl-clipboard pkgs.wtype pkgs.xclip]}
+              --prefix PATH : ${lib.makeBinPath [pkgs.coreutils pkgs.ffmpeg pkgs.pipewire pkgs.sway pkgs.wl-clipboard pkgs.wtype pkgs.xclip]}
           '';
         });
 

@@ -9,6 +9,8 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use serde_json::Value;
 
+pub const DEFAULT_PASTE_SETTLE_DELAY_MS: u64 = 120;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FocusedWindow(pub u64);
 
@@ -40,15 +42,25 @@ pub trait TextInjector: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct DesktopTextInjector {
     delay_microsecs: u32,
+    paste_settle_delay_ms: u64,
 }
 
 impl DesktopTextInjector {
     pub fn new(delay_microsecs: u32) -> Self {
-        Self { delay_microsecs }
+        Self::new_with_paste_settle_delay(delay_microsecs, DEFAULT_PASTE_SETTLE_DELAY_MS)
+    }
+
+    pub fn new_with_paste_settle_delay(delay_microsecs: u32, paste_settle_delay_ms: u64) -> Self {
+        Self {
+            delay_microsecs,
+            paste_settle_delay_ms,
+        }
     }
 
     fn backend(&self) -> DesktopTextBackend {
-        if let Some(injector) = SwayTextInjector::detect(self.delay_microsecs) {
+        if let Some(injector) =
+            SwayTextInjector::detect(self.delay_microsecs, self.paste_settle_delay_ms)
+        {
             DesktopTextBackend::Sway(injector)
         } else {
             DesktopTextBackend::X11(LibXdoTextInjector::new(self.delay_microsecs))
@@ -192,6 +204,7 @@ impl TextInjector for LibXdoTextInjector {
 #[derive(Debug, Clone)]
 pub struct SwayTextInjector {
     delay_millis: u32,
+    paste_settle_delay_ms: u64,
     sway_socket: PathBuf,
     wayland_display: Option<String>,
     swaymsg_path: PathBuf,
@@ -201,12 +214,13 @@ pub struct SwayTextInjector {
 }
 
 impl SwayTextInjector {
-    pub fn detect(delay_microsecs: u32) -> Option<Self> {
+    pub fn detect(delay_microsecs: u32, paste_settle_delay_ms: u64) -> Option<Self> {
         let sway_socket = default_sway_socket_path()?;
         let wayland_display =
             default_wayland_display().or_else(|| wayland_display_from_sway_process(&sway_socket));
         Some(Self {
             delay_millis: delay_microsecs.div_ceil(1000),
+            paste_settle_delay_ms,
             sway_socket,
             wayland_display,
             swaymsg_path: PathBuf::from("swaymsg"),
@@ -246,9 +260,9 @@ impl SwayTextInjector {
         command
     }
 
-    fn add_wtype_timing_args(&self, command: &mut Command) {
-        if self.delay_millis > 0 {
-            let delay = self.delay_millis.to_string();
+    fn add_wtype_timing_args(&self, command: &mut Command, delay_millis: u32) {
+        if delay_millis > 0 {
+            let delay = delay_millis.to_string();
             command.arg("-s").arg(&delay);
             command.arg("-d").arg(delay);
         }
@@ -259,8 +273,9 @@ impl SwayTextInjector {
         command: &mut Command,
         erase_count: usize,
         has_text_suffix: bool,
+        delay_millis: u32,
     ) {
-        self.add_wtype_timing_args(command);
+        self.add_wtype_timing_args(command, delay_millis);
         for _ in 0..erase_count {
             command.arg("-k").arg("BackSpace");
         }
@@ -270,7 +285,7 @@ impl SwayTextInjector {
     }
 
     fn add_wtype_paste_args(&self, command: &mut Command, erase_count: usize) {
-        self.add_wtype_timing_args(command);
+        self.add_wtype_timing_args(command, self.delay_millis);
         for _ in 0..erase_count {
             command.arg("-k").arg("BackSpace");
         }
@@ -297,7 +312,8 @@ impl SwayTextInjector {
     }
 
     fn run_hybrid_replacement(&self, erase_count: usize, text_suffix: &str) -> anyhow::Result<()> {
-        if self.should_paste_suffix(text_suffix)? {
+        let prefers_paste = self.should_paste_suffix(text_suffix)?;
+        if prefers_paste {
             match self.try_clipboard_replacement(erase_count, text_suffix) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
@@ -309,20 +325,27 @@ impl SwayTextInjector {
             }
         }
 
-        self.run_wtype_typed_replacement(erase_count, text_suffix)
+        let typed_delay_millis = if prefers_paste { 0 } else { self.delay_millis };
+        self.run_wtype_typed_replacement(erase_count, text_suffix, typed_delay_millis)
     }
 
     fn run_wtype_typed_replacement(
         &self,
         erase_count: usize,
         text_suffix: &str,
+        delay_millis: u32,
     ) -> anyhow::Result<()> {
         if erase_count == 0 && text_suffix.is_empty() {
             return Ok(());
         }
 
         let mut command = self.wtype_command();
-        self.add_wtype_replacement_args(&mut command, erase_count, !text_suffix.is_empty());
+        self.add_wtype_replacement_args(
+            &mut command,
+            erase_count,
+            !text_suffix.is_empty(),
+            delay_millis,
+        );
 
         if text_suffix.is_empty() {
             let status = command
@@ -512,7 +535,7 @@ impl SwayTextInjector {
     }
 
     fn wait_for_paste_delivery(&self) {
-        let delay = u64::from(self.delay_millis.max(120));
+        let delay = self.paste_settle_delay_ms.max(u64::from(self.delay_millis));
         thread::sleep(Duration::from_millis(delay));
     }
 
@@ -522,7 +545,7 @@ impl SwayTextInjector {
         }
 
         let mut command = self.wtype_command();
-        self.add_wtype_timing_args(&mut command);
+        self.add_wtype_timing_args(&mut command, self.delay_millis);
         for _ in 0..count {
             command.arg("-k").arg(key);
         }
@@ -1115,7 +1138,7 @@ mod tests {
         let injector = test_sway_injector(20);
         let mut command = injector.wtype_command();
 
-        injector.add_wtype_replacement_args(&mut command, 0, true);
+        injector.add_wtype_replacement_args(&mut command, 0, true, 20);
 
         assert_eq!(command_args(&command), vec!["-s", "20", "-d", "20", "-"]);
     }
@@ -1125,7 +1148,7 @@ mod tests {
         let injector = test_sway_injector(0);
         let mut command = injector.wtype_command();
 
-        injector.add_wtype_replacement_args(&mut command, 0, true);
+        injector.add_wtype_replacement_args(&mut command, 0, true, 0);
 
         assert_eq!(command_args(&command), vec!["-"]);
     }
@@ -1135,7 +1158,7 @@ mod tests {
         let injector = test_sway_injector(20);
         let mut command = injector.wtype_command();
 
-        injector.add_wtype_replacement_args(&mut command, 2, true);
+        injector.add_wtype_replacement_args(&mut command, 2, true, 20);
 
         assert_eq!(
             command_args(&command),
@@ -1150,6 +1173,19 @@ mod tests {
                 "BackSpace",
                 "-"
             ]
+        );
+    }
+
+    #[test]
+    fn sway_gui_fallback_command_omits_delay() {
+        let injector = test_sway_injector(20);
+        let mut command = injector.wtype_command();
+
+        injector.add_wtype_replacement_args(&mut command, 2, true, 0);
+
+        assert_eq!(
+            command_args(&command),
+            vec!["-k", "BackSpace", "-k", "BackSpace", "-"]
         );
     }
 
@@ -1240,6 +1276,7 @@ mod tests {
     fn test_sway_injector(delay_millis: u32) -> SwayTextInjector {
         SwayTextInjector {
             delay_millis,
+            paste_settle_delay_ms: DEFAULT_PASTE_SETTLE_DELAY_MS,
             sway_socket: PathBuf::from("/run/user/1001/sway-ipc.1001.42.sock"),
             wayland_display: None,
             swaymsg_path: PathBuf::from("swaymsg"),

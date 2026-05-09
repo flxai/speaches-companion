@@ -73,6 +73,7 @@ listening_marker = "💬"
 inline_partials = true
 append_space = true
 inject_delay_microsecs = 3000
+paste_settle_delay_ms = 450
 leading_silence_ms = 250
 preroll_ms = 750
 
@@ -128,7 +129,9 @@ On Sway, text suffixes are pasted as temporary clipboard chunks outside terminal
 windows; terminal windows still use virtual key typing. Some browser text fields
 drop characters when virtual keyboard events arrive too quickly; set
 `inject_delay_microsecs` or pass `--inject-delay-microsecs` to add a per-key
-delay and a short pre-injection settle delay for virtual key operations.
+delay for virtual key typing. Use `paste_settle_delay_ms` or
+`--paste-settle-delay-ms` to keep the temporary clipboard around longer after a
+Wayland paste before restoring the previous clipboard contents.
 
 Inline partial injection is enabled by default. If the trigger binding keeps a
 modifier physically held while dictating, such as some i3 `$sup+d` bindings,
