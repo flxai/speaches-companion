@@ -569,7 +569,8 @@ impl SwayTextInjector {
         command
             .args(["--type", "text/plain"])
             .stdin(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to start {}", self.wl_copy_path.display()))?;
@@ -578,12 +579,9 @@ impl SwayTextInjector {
             .write_all(text)
             .context("failed to send text to wl-copy")?;
         drop(stdin);
-        let output = child
-            .wait_with_output()
-            .context("failed to wait for wl-copy")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("wl-copy failed with status {}: {stderr}", output.status);
+        let status = child.wait().context("failed to wait for wl-copy")?;
+        if !status.success() {
+            bail!("wl-copy failed with status {status}");
         }
         Ok(())
     }
