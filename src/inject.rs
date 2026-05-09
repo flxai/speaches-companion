@@ -14,12 +14,16 @@ pub const DEFAULT_PASTE_SETTLE_DELAY_MS: u64 = 120;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FocusedWindow(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionInsertMode {
+    #[default]
+    Typed,
+    GuiPaste,
+    TerminalPaste,
+}
+
 pub trait TextInjector: Send + Sync {
     fn inject_text(&self, text: &str) -> anyhow::Result<()>;
-
-    fn should_show_listening_marker(&self) -> anyhow::Result<bool> {
-        Ok(true)
-    }
 
     fn press_enter(&self) -> anyhow::Result<()> {
         self.inject_text("\n")
@@ -38,8 +42,22 @@ pub trait TextInjector: Send + Sync {
         self.inject_text(text_suffix)
     }
 
+    fn replace_tail_in_mode(
+        &self,
+        erase_count: usize,
+        text_suffix: &str,
+        mode: SessionInsertMode,
+    ) -> anyhow::Result<()> {
+        let _ = mode;
+        self.replace_tail(erase_count, text_suffix)
+    }
+
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
         Ok(None)
+    }
+
+    fn session_insert_mode(&self) -> anyhow::Result<SessionInsertMode> {
+        Ok(SessionInsertMode::Typed)
     }
 }
 
@@ -103,13 +121,6 @@ impl TextInjector for DesktopTextBackend {
         }
     }
 
-    fn should_show_listening_marker(&self) -> anyhow::Result<bool> {
-        match self {
-            Self::Sway(injector) => injector.should_show_listening_marker(),
-            Self::X11(injector) => injector.should_show_listening_marker(),
-        }
-    }
-
     fn press_enter(&self) -> anyhow::Result<()> {
         match self {
             Self::Sway(injector) => injector.press_enter(),
@@ -131,10 +142,29 @@ impl TextInjector for DesktopTextBackend {
         }
     }
 
+    fn replace_tail_in_mode(
+        &self,
+        erase_count: usize,
+        text_suffix: &str,
+        mode: SessionInsertMode,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Sway(injector) => injector.replace_tail_in_mode(erase_count, text_suffix, mode),
+            Self::X11(injector) => injector.replace_tail_in_mode(erase_count, text_suffix, mode),
+        }
+    }
+
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
         match self {
             Self::Sway(injector) => injector.focused_window(),
             Self::X11(injector) => injector.focused_window(),
+        }
+    }
+
+    fn session_insert_mode(&self) -> anyhow::Result<SessionInsertMode> {
+        match self {
+            Self::Sway(injector) => injector.session_insert_mode(),
+            Self::X11(injector) => injector.session_insert_mode(),
         }
     }
 }
@@ -142,10 +172,6 @@ impl TextInjector for DesktopTextBackend {
 impl TextInjector for DesktopTextInjector {
     fn inject_text(&self, text: &str) -> anyhow::Result<()> {
         self.backend().inject_text(text)
-    }
-
-    fn should_show_listening_marker(&self) -> anyhow::Result<bool> {
-        self.backend().should_show_listening_marker()
     }
 
     fn press_enter(&self) -> anyhow::Result<()> {
@@ -160,8 +186,22 @@ impl TextInjector for DesktopTextInjector {
         self.backend().replace_tail(erase_count, text_suffix)
     }
 
+    fn replace_tail_in_mode(
+        &self,
+        erase_count: usize,
+        text_suffix: &str,
+        mode: SessionInsertMode,
+    ) -> anyhow::Result<()> {
+        self.backend()
+            .replace_tail_in_mode(erase_count, text_suffix, mode)
+    }
+
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
         self.backend().focused_window()
+    }
+
+    fn session_insert_mode(&self) -> anyhow::Result<SessionInsertMode> {
+        self.backend().session_insert_mode()
     }
 }
 
@@ -341,17 +381,18 @@ impl SwayTextInjector {
         command.arg("-m").arg("ctrl");
     }
 
-    fn run_wtype_with_text(&self, text: &str) -> anyhow::Result<()> {
-        if text.is_empty() {
-            return Ok(());
-        }
-
-        self.run_hybrid_replacement(0, text)
-    }
-
-    fn run_hybrid_replacement(&self, erase_count: usize, text_suffix: &str) -> anyhow::Result<()> {
-        let paste_mode = self.paste_mode_for_suffix(text_suffix)?;
-        if let Some(paste_mode) = paste_mode {
+    fn run_replacement_with_mode(
+        &self,
+        erase_count: usize,
+        text_suffix: &str,
+        mode: SessionInsertMode,
+    ) -> anyhow::Result<()> {
+        let paste_mode = match mode {
+            SessionInsertMode::GuiPaste => Some(PasteMode::Gui),
+            SessionInsertMode::TerminalPaste => Some(PasteMode::Terminal),
+            SessionInsertMode::Typed => None,
+        };
+        if let Some(paste_mode) = paste_mode.filter(|_| !text_suffix.is_empty()) {
             match self.try_clipboard_replacement(erase_count, text_suffix, paste_mode) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
@@ -422,10 +463,6 @@ impl SwayTextInjector {
         paste_mode: PasteMode,
     ) -> anyhow::Result<bool> {
         let snapshot = self.clipboard_snapshot()?;
-        if matches!(snapshot, ClipboardSnapshot::NonText) {
-            return Ok(false);
-        };
-
         self.copy_text_to_clipboard(text_suffix.as_bytes())?;
         let paste_result = self.run_wtype_paste(erase_count, paste_mode);
         self.wait_for_paste_delivery();
@@ -434,18 +471,6 @@ impl SwayTextInjector {
         }
         paste_result?;
         Ok(true)
-    }
-
-    fn paste_mode_for_suffix(&self, text_suffix: &str) -> anyhow::Result<Option<PasteMode>> {
-        if text_suffix.is_empty() {
-            return Ok(None);
-        }
-
-        if self.focused_target_is_terminal()? {
-            Ok(self.paste_in_terminals.then_some(PasteMode::Terminal))
-        } else {
-            Ok(Some(PasteMode::Gui))
-        }
     }
 
     fn focused_target_is_terminal(&self) -> anyhow::Result<bool> {
@@ -608,16 +633,9 @@ impl SwayTextInjector {
 
 impl TextInjector for SwayTextInjector {
     fn inject_text(&self, text: &str) -> anyhow::Result<()> {
-        self.run_wtype_with_text(text)
+        let mode = self.session_insert_mode()?;
+        self.run_replacement_with_mode(0, text, mode)
             .context("sway/wtype text injection failed")
-    }
-
-    fn should_show_listening_marker(&self) -> anyhow::Result<bool> {
-        if self.paste_in_terminals && self.focused_target_is_terminal()? {
-            Ok(false)
-        } else {
-            Ok(true)
-        }
     }
 
     fn press_enter(&self) -> anyhow::Result<()> {
@@ -631,7 +649,8 @@ impl TextInjector for SwayTextInjector {
     }
 
     fn replace_tail(&self, erase_count: usize, text_suffix: &str) -> anyhow::Result<()> {
-        self.run_hybrid_replacement(erase_count, text_suffix)
+        let mode = self.session_insert_mode()?;
+        self.run_replacement_with_mode(erase_count, text_suffix, mode)
             .context("sway text replacement failed")
     }
 
@@ -639,6 +658,28 @@ impl TextInjector for SwayTextInjector {
         let tree = self.sway_tree()?;
         let focused_id = focused_sway_node_id(&tree).context("failed to find focused Sway node")?;
         Ok(Some(FocusedWindow(focused_id)))
+    }
+
+    fn replace_tail_in_mode(
+        &self,
+        erase_count: usize,
+        text_suffix: &str,
+        mode: SessionInsertMode,
+    ) -> anyhow::Result<()> {
+        self.run_replacement_with_mode(erase_count, text_suffix, mode)
+            .context("sway text replacement failed")
+    }
+
+    fn session_insert_mode(&self) -> anyhow::Result<SessionInsertMode> {
+        if self.focused_target_is_terminal()? {
+            if self.paste_in_terminals {
+                Ok(SessionInsertMode::TerminalPaste)
+            } else {
+                Ok(SessionInsertMode::Typed)
+            }
+        } else {
+            Ok(SessionInsertMode::GuiPaste)
+        }
     }
 }
 
@@ -938,6 +979,7 @@ where
 {
     injector: I,
     target_window: Option<FocusedWindow>,
+    session_insert_mode: SessionInsertMode,
     inserted_text: String,
     aborted: bool,
 }
@@ -948,9 +990,11 @@ where
 {
     pub fn start(injector: I) -> anyhow::Result<Self> {
         let target_window = injector.focused_window()?;
+        let session_insert_mode = injector.session_insert_mode()?;
         Ok(Self {
             injector,
             target_window,
+            session_insert_mode,
             inserted_text: String::new(),
             aborted: false,
         })
@@ -965,7 +1009,8 @@ where
         let prefix_bytes = common_prefix_byte_len(&self.inserted_text, text);
         let erase_count = self.inserted_text[prefix_bytes..].chars().count();
         let text_suffix = &text[prefix_bytes..];
-        self.injector.replace_tail(erase_count, text_suffix)?;
+        self.injector
+            .replace_tail_in_mode(erase_count, text_suffix, self.session_insert_mode)?;
         self.inserted_text = text.to_string();
         Ok(true)
     }
@@ -1127,6 +1172,23 @@ mod tests {
         assert_eq!(
             *replacements.lock().unwrap(),
             vec![(0, "💬".to_string()), (1, "hello".to_string())]
+        );
+    }
+
+    #[test]
+    fn speculative_replacement_uses_session_mode_captured_at_start() {
+        let injector = ModeCapturingInjector::default();
+        let modes = injector.modes.clone();
+        let current_mode = injector.current_mode.clone();
+        let mut session = SpeculativeTextSession::start(injector).unwrap();
+
+        *current_mode.lock().unwrap() = SessionInsertMode::Typed;
+        session.replace_text("💬").unwrap();
+        session.replace_text("hello").unwrap();
+
+        assert_eq!(
+            *modes.lock().unwrap(),
+            vec![SessionInsertMode::GuiPaste, SessionInsertMode::GuiPaste]
         );
     }
 
@@ -1370,6 +1432,21 @@ mod tests {
         replacements: Arc<Mutex<Vec<(usize, String)>>>,
     }
 
+    #[derive(Clone)]
+    struct ModeCapturingInjector {
+        current_mode: Arc<Mutex<SessionInsertMode>>,
+        modes: Arc<Mutex<Vec<SessionInsertMode>>>,
+    }
+
+    impl Default for ModeCapturingInjector {
+        fn default() -> Self {
+            Self {
+                current_mode: Arc::new(Mutex::new(SessionInsertMode::GuiPaste)),
+                modes: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
     fn test_sway_injector(delay_millis: u32) -> SwayTextInjector {
         SwayTextInjector {
             delay_millis,
@@ -1402,6 +1479,26 @@ mod tests {
                 .unwrap()
                 .push((erase_count, text_suffix.to_string()));
             Ok(())
+        }
+    }
+
+    impl TextInjector for ModeCapturingInjector {
+        fn inject_text(&self, text: &str) -> anyhow::Result<()> {
+            self.replace_tail(0, text)
+        }
+
+        fn replace_tail_in_mode(
+            &self,
+            _erase_count: usize,
+            _text_suffix: &str,
+            mode: SessionInsertMode,
+        ) -> anyhow::Result<()> {
+            self.modes.lock().unwrap().push(mode);
+            Ok(())
+        }
+
+        fn session_insert_mode(&self) -> anyhow::Result<SessionInsertMode> {
+            Ok(*self.current_mode.lock().unwrap())
         }
     }
 }

@@ -98,7 +98,6 @@ where
     I: TextInjector,
 {
     session: S,
-    listening_marker: Option<String>,
     partial_command_tx: mpsc::Sender<PartialTextCommand>,
     partial_task: JoinHandle<PartialTextSession<I>>,
 }
@@ -360,16 +359,7 @@ where
                 return Err(error);
             }
         };
-        let listening_marker = match self.injector.should_show_listening_marker() {
-            Ok(true) => self.listening_marker.clone(),
-            Ok(false) => None,
-            Err(error) => {
-                let _ = self.transcriber.stop(live_session.session).await;
-                self.notify_failure("Listening marker eligibility check failed", &error);
-                return Err(error);
-            }
-        };
-        if let Some(marker) = listening_marker.as_deref() {
+        if let Some(marker) = self.listening_marker.as_deref() {
             if let Err(error) = text_session.replace_text(marker) {
                 let _ = self.transcriber.stop(live_session.session).await;
                 self.notify_failure("Listening marker injection failed", &error);
@@ -390,7 +380,6 @@ where
         ));
         self.active = Some(ActiveStreamingSession {
             session: live_session.session,
-            listening_marker,
             partial_command_tx,
             partial_task,
         });
@@ -404,13 +393,14 @@ where
         };
         let ActiveStreamingSession {
             session,
-            listening_marker,
             partial_command_tx,
             partial_task,
         } = active;
 
         if self.final_transcript {
-            if let Err(error) = show_waiting_marker(&partial_command_tx, listening_marker).await {
+            if let Err(error) =
+                show_waiting_marker(&partial_command_tx, self.listening_marker.clone()).await
+            {
                 self.notify_failure("Final wait marker replacement failed", &error);
             }
         }

@@ -198,39 +198,6 @@ async fn streaming_marker_is_replaced_by_live_partial_before_hotkey_up() {
 }
 
 #[tokio::test]
-async fn streaming_skips_marker_when_injector_disables_it() {
-    let transcriber = ManualLiveTranscriber::new("hello window");
-    let updates = transcriber.updates.clone();
-    let injector = FakeInjector {
-        show_listening_marker: false,
-        ..FakeInjector::default()
-    };
-    let operations = injector.operations.clone();
-    let mut controller = StreamingDictationController::new_with_notifiers(
-        transcriber,
-        injector,
-        FakeTranscriptNotifier::default(),
-        FakeErrorNotifier::default(),
-    )
-    .with_partial_chunking_config(no_chunking())
-    .with_listening_marker(Some("💬".to_string()));
-
-    controller
-        .handle_hotkey(IpcCommand::HotkeyDown)
-        .await
-        .unwrap();
-    assert!(operations.lock().unwrap().is_empty());
-
-    updates.send("hello").await;
-    wait_for_operations_len(&operations, 1).await;
-
-    assert_eq!(
-        *operations.lock().unwrap(),
-        vec![InjectOperation::Type("hello".to_string())]
-    );
-}
-
-#[tokio::test]
 async fn streaming_marker_is_replaced_by_partial_and_final_text() {
     let transcriber = ManualLiveTranscriber::new("  hello window\n");
     let updates = transcriber.updates.clone();
@@ -1072,7 +1039,6 @@ enum InjectOperation {
 struct FakeInjector {
     operations: Arc<Mutex<Vec<InjectOperation>>>,
     current_window: Arc<Mutex<Option<FocusedWindow>>>,
-    show_listening_marker: bool,
 }
 
 impl Default for FakeInjector {
@@ -1080,7 +1046,6 @@ impl Default for FakeInjector {
         Self {
             operations: Arc::new(Mutex::new(Vec::new())),
             current_window: Arc::new(Mutex::new(Some(FocusedWindow(1)))),
-            show_listening_marker: true,
         }
     }
 }
@@ -1108,10 +1073,6 @@ impl TextInjector for FakeInjector {
 
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
         Ok(*self.current_window.lock().unwrap())
-    }
-
-    fn should_show_listening_marker(&self) -> anyhow::Result<bool> {
-        Ok(self.show_listening_marker)
     }
 }
 
