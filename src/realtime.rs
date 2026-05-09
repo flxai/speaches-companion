@@ -30,8 +30,10 @@ const REALTIME_WARMUP_DURATION: Duration = Duration::from_millis(500);
 const REALTIME_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 const REALTIME_NO_FINAL_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const REALTIME_AUDIO_POLL: Duration = Duration::from_millis(40);
-const REALTIME_SPEECH_GATE_PREROLL: Duration = Duration::from_millis(250);
-const REALTIME_SPEECH_GATE_RMS_THRESHOLD: f64 = 350.0;
+const REALTIME_SPEECH_GATE_PREROLL: Duration = Duration::from_millis(300);
+const REALTIME_SPEECH_GATE_RMS_THRESHOLD: f64 = 700.0;
+const REALTIME_SPEECH_GATE_FRAME: Duration = Duration::from_millis(20);
+const REALTIME_SPEECH_GATE_MIN_SPEECH: Duration = Duration::from_millis(160);
 
 pub struct RunOutcome {
     pub result: PhaseResult,
@@ -85,7 +87,7 @@ impl RealtimeSpeechGate {
             self.pending.extend_from_slice(chunk);
             trim_vec_to_recent(&mut self.pending, self.max_pending_bytes);
 
-            if pcm_rms_s16le(chunk) >= REALTIME_SPEECH_GATE_RMS_THRESHOLD {
+            if pending_contains_sustained_speech(&self.pending) {
                 self.speech_started = true;
                 outgoing.extend(
                     self.pending
@@ -589,6 +591,25 @@ fn chunk_bytes_for_duration(sample_rate: u32, duration: Duration) -> usize {
     ((duration.as_secs_f64() * f64::from(sample_rate)).ceil() as usize * 2).max(2)
 }
 
+fn pending_contains_sustained_speech(pcm: &[u8]) -> bool {
+    let frame_bytes = chunk_bytes_for_duration(SAMPLE_RATE, REALTIME_SPEECH_GATE_FRAME);
+    let min_speech_bytes = chunk_bytes_for_duration(SAMPLE_RATE, REALTIME_SPEECH_GATE_MIN_SPEECH);
+    let mut sustained_bytes = 0usize;
+
+    for frame in pcm.chunks(frame_bytes) {
+        if pcm_rms_s16le(frame) >= REALTIME_SPEECH_GATE_RMS_THRESHOLD {
+            sustained_bytes += frame.len();
+            if sustained_bytes >= min_speech_bytes {
+                return true;
+            }
+        } else {
+            sustained_bytes = 0;
+        }
+    }
+
+    false
+}
+
 fn trim_vec_to_recent(buffer: &mut Vec<u8>, retain_bytes: usize) {
     let trim_count = buffer.len().saturating_sub(retain_bytes);
     if trim_count > 0 {
@@ -906,13 +927,27 @@ mod tests {
         let mut speech_gate = RealtimeSpeechGate::new(SAMPLE_RATE);
         let noise = vec![0u8; CHUNK_BYTES];
         let speech = vec![0x20u8; CHUNK_BYTES];
+        let snapshot = [noise, speech.clone(), speech].concat();
+
+        let chunks = realtime_audio_chunks_since(&snapshot, &mut cursor, &mut speech_gate);
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].len(), CHUNK_BYTES);
+        assert_eq!(chunks[1].len(), CHUNK_BYTES);
+        assert_eq!(chunks[2].len(), CHUNK_BYTES);
+    }
+
+    #[test]
+    fn realtime_audio_chunks_since_ignores_single_loud_chunk() {
+        let mut cursor = 0;
+        let mut speech_gate = RealtimeSpeechGate::new(SAMPLE_RATE);
+        let noise = vec![0u8; CHUNK_BYTES];
+        let speech = vec![0x20u8; CHUNK_BYTES];
         let snapshot = [noise, speech].concat();
 
         let chunks = realtime_audio_chunks_since(&snapshot, &mut cursor, &mut speech_gate);
 
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].len(), CHUNK_BYTES);
-        assert_eq!(chunks[1].len(), CHUNK_BYTES);
+        assert!(chunks.is_empty());
     }
 
     #[tokio::test]
