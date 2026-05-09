@@ -361,7 +361,7 @@ impl SwayTextInjector {
         &self,
         command: &mut Command,
         erase_count: usize,
-        _paste_mode: PasteMode,
+        paste_mode: PasteMode,
     ) {
         self.add_wtype_timing_args(command, self.delay_millis);
         for _ in 0..erase_count {
@@ -371,25 +371,14 @@ impl SwayTextInjector {
             command.arg("-s").arg(self.delay_millis.to_string());
         }
         command.arg("-M").arg("ctrl");
-        command.arg("-P").arg("v").arg("-p").arg("v");
-        command.arg("-m").arg("ctrl");
-    }
-
-    fn add_wtype_bracketed_paste_args(&self, command: &mut Command, erase_count: usize) {
-        for _ in 0..erase_count {
-            command.arg("-k").arg("BackSpace");
+        if matches!(paste_mode, PasteMode::Terminal) {
+            command.arg("-M").arg("shift");
         }
-        command.arg("-");
-    }
-
-    fn bracketed_paste_payload(text: &str) -> String {
-        let mut payload = String::with_capacity(text.len() + 12);
-        payload.push('\u{1b}');
-        payload.push_str("[200~");
-        payload.push_str(text);
-        payload.push('\u{1b}');
-        payload.push_str("[201~");
-        payload
+        command.arg("-P").arg("v").arg("-p").arg("v");
+        if matches!(paste_mode, PasteMode::Terminal) {
+            command.arg("-m").arg("shift");
+        }
+        command.arg("-m").arg("ctrl");
     }
 
     fn run_replacement_with_mode(
@@ -398,14 +387,12 @@ impl SwayTextInjector {
         text_suffix: &str,
         mode: SessionInsertMode,
     ) -> anyhow::Result<()> {
-        if matches!(mode, SessionInsertMode::TerminalPaste) {
-            return self.run_wtype_terminal_paste_replacement(erase_count, text_suffix);
-        }
-
-        let paste_mode = matches!(mode, SessionInsertMode::GuiPaste)
-            .then_some(PasteMode::Gui)
-            .filter(|_| !text_suffix.is_empty());
-        if let Some(paste_mode) = paste_mode {
+        let paste_mode = match mode {
+            SessionInsertMode::GuiPaste => Some(PasteMode::Gui),
+            SessionInsertMode::TerminalPaste => Some(PasteMode::Terminal),
+            SessionInsertMode::Typed => None,
+        };
+        if let Some(paste_mode) = paste_mode.filter(|_| !text_suffix.is_empty()) {
             match self.try_clipboard_replacement(erase_count, text_suffix, paste_mode) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
@@ -423,45 +410,6 @@ impl SwayTextInjector {
             self.delay_millis
         };
         self.run_wtype_typed_replacement(erase_count, text_suffix, typed_delay_millis)
-    }
-
-    fn run_wtype_terminal_paste_replacement(
-        &self,
-        erase_count: usize,
-        text_suffix: &str,
-    ) -> anyhow::Result<()> {
-        if erase_count == 0 && text_suffix.is_empty() {
-            return Ok(());
-        }
-
-        let mut command = self.wtype_command();
-        let payload = (!text_suffix.is_empty()).then(|| Self::bracketed_paste_payload(text_suffix));
-        self.add_wtype_bracketed_paste_args(&mut command, erase_count);
-
-        if let Some(payload) = payload {
-            command.stdin(Stdio::piped());
-            let mut child = command
-                .spawn()
-                .with_context(|| format!("failed to start {}", self.wtype_path.display()))?;
-            let mut stdin = child.stdin.take().context("failed to open wtype stdin")?;
-            stdin
-                .write_all(payload.as_bytes())
-                .context("failed to send bracketed paste to wtype")?;
-            drop(stdin);
-            let status = child.wait().context("failed to wait for wtype")?;
-            if !status.success() {
-                bail!("wtype terminal paste failed with status {status}");
-            }
-            return Ok(());
-        }
-
-        let status = command
-            .status()
-            .with_context(|| format!("failed to start {}", self.wtype_path.display()))?;
-        if !status.success() {
-            bail!("wtype terminal text erasure failed with status {status}");
-        }
-        Ok(())
     }
 
     fn run_wtype_typed_replacement(
@@ -744,6 +692,7 @@ enum ClipboardSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PasteMode {
     Gui,
+    Terminal,
 }
 
 fn default_sway_socket_path() -> Option<PathBuf> {
@@ -1396,19 +1345,38 @@ mod tests {
     }
 
     #[test]
-    fn sway_terminal_paste_command_uses_bracketed_paste_payload() {
+    fn sway_terminal_paste_command_uses_ctrl_shift_v() {
         let injector = test_sway_injector(20);
         let mut command = injector.wtype_command();
 
-        injector.add_wtype_bracketed_paste_args(&mut command, 2);
+        injector.add_wtype_paste_args(&mut command, 2, PasteMode::Terminal);
 
         assert_eq!(
             command_args(&command),
-            vec!["-k", "BackSpace", "-k", "BackSpace", "-"]
-        );
-        assert_eq!(
-            SwayTextInjector::bracketed_paste_payload("💬hello world"),
-            "\u{1b}[200~💬hello world\u{1b}[201~"
+            vec![
+                "-s",
+                "20",
+                "-d",
+                "20",
+                "-k",
+                "BackSpace",
+                "-k",
+                "BackSpace",
+                "-s",
+                "20",
+                "-M",
+                "ctrl",
+                "-M",
+                "shift",
+                "-P",
+                "v",
+                "-p",
+                "v",
+                "-m",
+                "shift",
+                "-m",
+                "ctrl"
+            ]
         );
     }
 
