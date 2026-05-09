@@ -83,9 +83,10 @@ stock_model = "alexa"
 # assets_dir = "/path/to/predownloaded-openwakeword-assets"
 threshold = 0.5
 frame_ms = 80
-silence_timeout_ms = 900
+silence_timeout_ms = 5000
 activation_grace_ms = 5000
 max_recording_ms = 30000
+press_enter = true
 ```
 
 For compatible existing setups, environment and CLI values still work. The

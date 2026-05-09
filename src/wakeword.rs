@@ -19,9 +19,10 @@ use crate::stt::{transcribe_file, TranscribeOptions};
 pub const DEFAULT_WAKEWORD_NAME: &str = "default";
 pub const DEFAULT_WAKEWORD_THRESHOLD: f32 = 0.5;
 pub const DEFAULT_WAKEWORD_FRAME_MS: u64 = 80;
-pub const DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS: u64 = 900;
+pub const DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS: u64 = 5_000;
 pub const DEFAULT_WAKEWORD_MAX_RECORDING_MS: u64 = 30_000;
+pub const DEFAULT_WAKEWORD_PRESS_ENTER: bool = true;
 pub const DEFAULT_OPENWAKEWORD_STOCK_MODEL: OpenWakewordStockModel = OpenWakewordStockModel::Alexa;
 
 const DEFAULT_WAKEWORD_IDLE_RETAIN_MS: u64 = 5_000;
@@ -82,6 +83,7 @@ pub struct WakewordSettings {
     pub silence_timeout: Duration,
     pub activation_grace: Duration,
     pub max_recording: Duration,
+    pub press_enter: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -770,6 +772,9 @@ where
         let transcript = transcribe_wake_recording(&config, &pcm).await?;
         if let Some(text) = format_transcript_for_injection(&transcript, config.append_space) {
             injector.inject_text(&text)?;
+            if config.settings.press_enter {
+                injector.press_enter()?;
+            }
         }
     }
 }
@@ -1049,6 +1054,7 @@ mod tests {
             silence_timeout: Duration::from_millis(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS),
             activation_grace: Duration::from_millis(DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS),
             max_recording: Duration::from_millis(DEFAULT_WAKEWORD_MAX_RECORDING_MS),
+            press_enter: DEFAULT_WAKEWORD_PRESS_ENTER,
         };
 
         let started = Instant::now();
@@ -1092,6 +1098,7 @@ mod tests {
             silence_timeout: Duration::from_millis(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS),
             activation_grace: Duration::from_millis(DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS),
             max_recording: Duration::from_millis(DEFAULT_WAKEWORD_MAX_RECORDING_MS),
+            press_enter: DEFAULT_WAKEWORD_PRESS_ENTER,
         };
 
         let paths = wakeword_paths(&settings).unwrap();
@@ -1193,6 +1200,7 @@ mod tests {
             silence_timeout: Duration::from_millis(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS),
             activation_grace: Duration::from_millis(DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS),
             max_recording: Duration::from_millis(DEFAULT_WAKEWORD_MAX_RECORDING_MS),
+            press_enter: DEFAULT_WAKEWORD_PRESS_ENTER,
         };
 
         let paths = ensure_wakeword_model(&settings).await.unwrap();
@@ -1228,6 +1236,7 @@ mod tests {
             silence_timeout: Duration::from_millis(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS),
             activation_grace: Duration::from_millis(DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS),
             max_recording: Duration::from_millis(DEFAULT_WAKEWORD_MAX_RECORDING_MS),
+            press_enter: DEFAULT_WAKEWORD_PRESS_ENTER,
         };
 
         let error = ensure_wakeword_model(&settings).await.unwrap_err();

@@ -30,8 +30,8 @@ use speaches_companion::wakeword::{
     default_wakeword_root, run_wakeword_loop, OpenWakewordStockModel, WakewordEngine,
     WakewordRunConfig, WakewordSettings, DEFAULT_OPENWAKEWORD_STOCK_MODEL,
     DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS, DEFAULT_WAKEWORD_FRAME_MS,
-    DEFAULT_WAKEWORD_MAX_RECORDING_MS, DEFAULT_WAKEWORD_NAME, DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS,
-    DEFAULT_WAKEWORD_THRESHOLD,
+    DEFAULT_WAKEWORD_MAX_RECORDING_MS, DEFAULT_WAKEWORD_NAME, DEFAULT_WAKEWORD_PRESS_ENTER,
+    DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS, DEFAULT_WAKEWORD_THRESHOLD,
 };
 
 const DEFAULT_LISTENING_MARKER: &str = "💬";
@@ -168,6 +168,10 @@ struct WakewordArgs {
     activation_grace_ms: Option<u64>,
     #[arg(long)]
     max_recording_ms: Option<u64>,
+    #[arg(long, conflicts_with = "no_press_enter")]
+    press_enter: bool,
+    #[arg(long)]
+    no_press_enter: bool,
     #[arg(long, conflicts_with = "no_append_space")]
     append_space: bool,
     #[arg(long)]
@@ -584,6 +588,16 @@ fn resolve_wakeword_settings(args: &WakewordArgs, file_config: &FileConfig) -> W
                 .or(file_config.wakeword.max_recording_ms)
                 .unwrap_or(DEFAULT_WAKEWORD_MAX_RECORDING_MS),
         ),
+        press_enter: if args.press_enter {
+            true
+        } else if args.no_press_enter {
+            false
+        } else {
+            file_config
+                .wakeword
+                .press_enter
+                .unwrap_or(DEFAULT_WAKEWORD_PRESS_ENTER)
+        },
     }
 }
 
@@ -1290,6 +1304,7 @@ mod tests {
             settings.silence_timeout,
             Duration::from_millis(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS)
         );
+        assert!(settings.press_enter);
     }
 
     #[test]
@@ -1306,6 +1321,7 @@ mod tests {
                 silence_timeout_ms: Some(700),
                 activation_grace_ms: Some(4_000),
                 max_recording_ms: Some(20_000),
+                press_enter: Some(false),
             },
             ..FileConfig::default()
         };
@@ -1325,6 +1341,7 @@ mod tests {
         assert_eq!(settings.silence_timeout, Duration::from_millis(700));
         assert_eq!(settings.activation_grace, Duration::from_millis(4_000));
         assert_eq!(settings.max_recording, Duration::from_millis(20_000));
+        assert!(!settings.press_enter);
     }
 
     #[test]
@@ -1343,6 +1360,7 @@ mod tests {
             "/tmp/cli-wakewords",
             "--threshold",
             "0.8",
+            "--no-press-enter",
             "--no-append-space",
             "--inject-delay-microsecs",
             "3000",
@@ -1354,6 +1372,7 @@ mod tests {
                 assets_dir: Some(PathBuf::from("/tmp/file-assets")),
                 root_dir: Some(PathBuf::from("/tmp/file-wakewords")),
                 threshold: Some(0.4),
+                press_enter: Some(true),
                 ..WakewordFileConfig::default()
             },
             dictation: DictationFileConfig {
@@ -1372,6 +1391,7 @@ mod tests {
         assert_eq!(settings.assets_dir, Some(PathBuf::from("/tmp/cli-assets")));
         assert_eq!(settings.root_dir, PathBuf::from("/tmp/cli-wakewords"));
         assert_eq!(settings.threshold, 0.8);
+        assert!(!settings.press_enter);
         assert!(!resolve_wakeword_append_space(&args, &file_config));
         assert_eq!(resolve_wakeword_inject_delay(&args, &file_config), 3_000);
     }

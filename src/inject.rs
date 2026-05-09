@@ -15,6 +15,10 @@ pub struct FocusedWindow(pub u64);
 pub trait TextInjector: Send + Sync {
     fn inject_text(&self, text: &str) -> anyhow::Result<()>;
 
+    fn press_enter(&self) -> anyhow::Result<()> {
+        self.inject_text("\n")
+    }
+
     fn erase_chars(&self, count: usize) -> anyhow::Result<()> {
         if count == 0 {
             return Ok(());
@@ -71,6 +75,13 @@ impl TextInjector for DesktopTextBackend {
         }
     }
 
+    fn press_enter(&self) -> anyhow::Result<()> {
+        match self {
+            Self::Sway(injector) => injector.press_enter(),
+            Self::X11(injector) => injector.press_enter(),
+        }
+    }
+
     fn erase_chars(&self, count: usize) -> anyhow::Result<()> {
         match self {
             Self::Sway(injector) => injector.erase_chars(count),
@@ -96,6 +107,10 @@ impl TextInjector for DesktopTextBackend {
 impl TextInjector for DesktopTextInjector {
     fn inject_text(&self, text: &str) -> anyhow::Result<()> {
         self.backend().inject_text(text)
+    }
+
+    fn press_enter(&self) -> anyhow::Result<()> {
+        self.backend().press_enter()
     }
 
     fn erase_chars(&self, count: usize) -> anyhow::Result<()> {
@@ -155,6 +170,12 @@ impl TextInjector for LibXdoTextInjector {
             Ok(())
         })
         .context("libxdo text replacement failed")
+    }
+
+    fn press_enter(&self) -> anyhow::Result<()> {
+        let xdo = RawXdo::new()?;
+        xdo.with_cleared_modifiers(|| xdo.send_keysequence("Return", self.delay_microsecs))
+            .context("libxdo enter key injection failed")
     }
 
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
@@ -519,6 +540,11 @@ impl TextInjector for SwayTextInjector {
     fn inject_text(&self, text: &str) -> anyhow::Result<()> {
         self.run_wtype_with_text(text)
             .context("sway/wtype text injection failed")
+    }
+
+    fn press_enter(&self) -> anyhow::Result<()> {
+        self.run_wtype_keys("Return", 1)
+            .context("sway/wtype enter key injection failed")
     }
 
     fn erase_chars(&self, count: usize) -> anyhow::Result<()> {

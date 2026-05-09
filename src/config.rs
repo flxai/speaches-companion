@@ -84,6 +84,7 @@ pub struct WakewordFileConfig {
     pub silence_timeout_ms: Option<u64>,
     pub activation_grace_ms: Option<u64>,
     pub max_recording_ms: Option<u64>,
+    pub press_enter: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
