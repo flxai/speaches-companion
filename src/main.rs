@@ -151,8 +151,7 @@ struct DictateLiveArgs {
 
 #[derive(Debug, Args)]
 struct WakewordArgs {
-    #[arg(default_value = DEFAULT_WAKEWORD_NAME)]
-    name: String,
+    name: Option<String>,
     #[arg(long)]
     config: Option<PathBuf>,
     #[arg(long, value_enum)]
@@ -576,7 +575,11 @@ fn resolve_daemon_settings(args: &DaemonArgs, file_config: &FileConfig) -> Daemo
 
 fn resolve_wakeword_settings(args: &WakewordArgs, file_config: &FileConfig) -> WakewordSettings {
     WakewordSettings {
-        name: args.name.clone(),
+        name: args
+            .name
+            .clone()
+            .or_else(|| file_config.wakeword.name.clone())
+            .unwrap_or_else(|| DEFAULT_WAKEWORD_NAME.to_owned()),
         engine: args
             .engine
             .or(file_config.wakeword.engine)
@@ -1410,9 +1413,10 @@ mod tests {
 
     #[test]
     fn wakeword_reads_settings_from_file_config() {
-        let args = parse_wakeword_args(["speaches-companion", "wakeword", "aurgob"]);
+        let args = parse_wakeword_args(["speaches-companion", "wakeword"]);
         let file_config = FileConfig {
             wakeword: WakewordFileConfig {
+                name: Some(String::from("aurgob")),
                 engine: Some(WakewordEngine::Onnx),
                 stock_model: Some(OpenWakewordStockModel::Weather),
                 assets_dir: Some(PathBuf::from("/tmp/openwakeword-assets")),
@@ -1446,6 +1450,22 @@ mod tests {
     }
 
     #[test]
+    fn wakeword_cli_name_overrides_file_config_name() {
+        let args = parse_wakeword_args(["speaches-companion", "wakeword", "samantha"]);
+        let file_config = FileConfig {
+            wakeword: WakewordFileConfig {
+                name: Some(String::from("hey_computer")),
+                ..WakewordFileConfig::default()
+            },
+            ..FileConfig::default()
+        };
+
+        let settings = resolve_wakeword_settings(&args, &file_config);
+
+        assert_eq!(settings.name, "samantha");
+    }
+
+    #[test]
     fn wakeword_cli_overrides_file_config() {
         let args = parse_wakeword_args([
             "speaches-companion",
@@ -1468,6 +1488,7 @@ mod tests {
         ]);
         let file_config = FileConfig {
             wakeword: WakewordFileConfig {
+                name: Some(String::from("hey_computer")),
                 engine: Some(WakewordEngine::Openwakeword),
                 stock_model: Some(OpenWakewordStockModel::Alexa),
                 assets_dir: Some(PathBuf::from("/tmp/file-assets")),

@@ -77,6 +77,7 @@ pub struct DictationFileConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct WakewordFileConfig {
+    pub name: Option<String>,
     pub engine: Option<WakewordEngine>,
     pub stock_model: Option<OpenWakewordStockModel>,
     pub assets_dir: Option<PathBuf>,

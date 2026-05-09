@@ -79,8 +79,11 @@ leading_silence_ms = 250
 preroll_ms = 750
 
 [wakeword]
+# bare `speaches-companion wakeword` uses this profile name by default
+name = "hey_computer"
 # root_dir defaults to $XDG_DATA_HOME/speaches-companion/wakewords
 engine = "openwakeword"
+# stock_model is only used as a fallback when root_dir/<name>/model.onnx is missing
 stock_model = "alexa"
 # assets_dir = "/path/to/predownloaded-openwakeword-assets"
 threshold = 0.5
@@ -195,7 +198,8 @@ nix run .#wakeword -- --stock-model weather
 nix run . -- wakeword --assets-dir "$(nix build .#openwakeword-assets --print-out-paths)"
 ```
 
-`wakeword [name]` defaults to `default` and stores artifacts under
+`wakeword [name]` defaults to `wakeword.name` when configured, otherwise
+`default`, and stores artifacts under
 `wakeword.root_dir/<name>/`; unset `root_dir` defaults to
 `$XDG_DATA_HOME/speaches-companion/wakewords` or
 `~/.local/share/speaches-companion/wakewords`. The canonical default engine is
@@ -206,14 +210,70 @@ predownloaded assets instead of downloading them on demand. The flake also
 exposes `.#openwakeword-assets` for prefetching those stock ONNX files
 explicitly.
 
-Custom wake-word training is intentionally not integrated here. If you want
-your own ONNX model, use the Python tooling from the upstream
-[openWakeWord](https://github.com/dscripka/openWakeWord) repository, then place
-the resulting file at `wakeword.root_dir/<name>/model.onnx`. For a standalone
-raw-audio model, run with `--engine onnx`; for a custom openWakeWord keyword
-head, keep the default `openwakeword` engine and replace only `model.onnx`.
-Speaches STT is still only used after a wake detection, and dictation stops
-after `silence_timeout_ms` of silence.
+For custom openWakeWord heads, the canonical automation path is:
+
+```sh
+nix run .#train-wakeword -- --help
+nix run .#train-wakeword -- "hey computer"
+```
+
+That command uses the pinned upstream openWakeWord training stack, generates
+synthetic positives for the provided phrase, trains a keyword head, exports an
+ONNX artifact, and installs it directly as
+`wakeword.root_dir/<derived-name>/model.onnx`. You can override the derived
+filesystem-safe name or install root explicitly:
+
+```sh
+nix run .#train-wakeword -- "Hey, Computer!" --name hey_computer
+nix run .#train-wakeword -- "hey computer" --root-dir /tmp/wakewords
+```
+
+The generated training workspace is kept under
+`$XDG_DATA_HOME/speaches-companion/openwakeword-train/` by default unless you
+pass `--output-dir`. For a standalone raw-audio model, run with `--engine onnx`;
+for a custom openWakeWord keyword head, keep the default `openwakeword` engine
+and replace only `model.onnx`. Speaches STT is still only used after a wake
+detection, and dictation stops after `silence_timeout_ms` of silence.
+
+To use the trained model as the chosen wakeword, point your config at the same
+`root_dir` and then run wakeword mode with the derived or chosen profile name:
+
+```toml
+[wakeword]
+name = "hey_computer"
+engine = "openwakeword"
+root_dir = "/home/you/.local/share/speaches-companion/wakewords"
+stock_model = "alexa" # fallback only; ignored once hey_computer/model.onnx exists
+```
+
+```sh
+speaches-companion wakeword
+# or
+nix run .#wakeword
+```
+
+`nix run .#train-wakeword -- "hey computer"` installs the ONNX head at
+`wakeword.root_dir/hey_computer/model.onnx`, so set `wakeword.name =
+"hey_computer"` if you want the bare `speaches-companion wakeword` command,
+WM binding, wrapper, or service to use it automatically. An explicit CLI name
+still overrides the config:
+
+```sh
+speaches-companion wakeword weather
+```
+
+If you want the upstream training notebook locally as the manual/advanced path,
+the flake still exposes a dev-only launcher:
+
+```sh
+nix run .#openwakeword-train
+```
+
+That command starts Jupyter Lab on the pinned upstream
+`training_models.ipynb` notebook from a Nix-provided Python environment. The
+launcher copies the notebook into a writable local workspace before opening it,
+and patches the demo inference cells to use the ONNX backend so they match this
+repo's runtime expectations.
 
 Speaches SSE transcription responses can be tested with:
 

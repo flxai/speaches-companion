@@ -188,6 +188,7 @@ leading_silence_ms = 400
 preroll_ms = 1000
 
 [wakeword]
+name = "hey_computer"
 engine = "openwakeword"
 stock_model = "weather"
 assets_dir = "openwakeword-assets"
@@ -238,6 +239,7 @@ press_enter = true
         config.wakeword.root_dir.as_deref(),
         Some(Path::new("wakewords"))
     );
+    assert_eq!(config.wakeword.name.as_deref(), Some("hey_computer"));
     assert_eq!(config.wakeword.engine, Some(WakewordEngine::Openwakeword));
     assert_eq!(
         config.wakeword.stock_model,
