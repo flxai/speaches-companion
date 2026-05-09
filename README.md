@@ -80,7 +80,7 @@ preroll_ms = 750
 
 [wakeword]
 # bare `speaches-companion wakeword` uses this profile name by default
-name = "hey_computer"
+name = "computer"
 # root_dir defaults to $XDG_DATA_HOME/speaches-companion/wakewords
 engine = "openwakeword"
 # stock_model is only used as a fallback when root_dir/<name>/model.onnx is missing
@@ -240,10 +240,10 @@ To use the trained model as the chosen wakeword, point your config at the same
 
 ```toml
 [wakeword]
-name = "hey_computer"
+name = "computer"
 engine = "openwakeword"
 root_dir = "/home/you/.local/share/speaches-companion/wakewords"
-stock_model = "alexa" # fallback only; ignored once hey_computer/model.onnx exists
+stock_model = "alexa" # fallback only; ignored once computer/model.onnx exists
 ```
 
 ```sh
