@@ -30,6 +30,8 @@ const REALTIME_WARMUP_DURATION: Duration = Duration::from_millis(500);
 const REALTIME_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 const REALTIME_NO_FINAL_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const REALTIME_AUDIO_POLL: Duration = Duration::from_millis(40);
+const REALTIME_SPEECH_GATE_PREROLL: Duration = Duration::from_millis(250);
+const REALTIME_SPEECH_GATE_RMS_THRESHOLD: f64 = 350.0;
 
 pub struct RunOutcome {
     pub result: PhaseResult,
@@ -54,6 +56,48 @@ pub struct RealtimeSession {
     stop_tx: watch::Sender<bool>,
     sender_task: JoinHandle<Result<usize>>,
     receiver_task: JoinHandle<Result<String>>,
+}
+
+#[derive(Debug, Clone)]
+struct RealtimeSpeechGate {
+    speech_started: bool,
+    pending: Vec<u8>,
+    max_pending_bytes: usize,
+}
+
+impl RealtimeSpeechGate {
+    fn new(sample_rate: u32) -> Self {
+        Self {
+            speech_started: false,
+            pending: Vec::new(),
+            max_pending_bytes: chunk_bytes_for_duration(sample_rate, REALTIME_SPEECH_GATE_PREROLL),
+        }
+    }
+
+    fn filter_new_audio(&mut self, new_audio: &[u8]) -> Vec<Vec<u8>> {
+        let mut outgoing = Vec::new();
+        for chunk in new_audio.chunks(CHUNK_BYTES) {
+            if self.speech_started {
+                outgoing.push(chunk.to_vec());
+                continue;
+            }
+
+            self.pending.extend_from_slice(chunk);
+            trim_vec_to_recent(&mut self.pending, self.max_pending_bytes);
+
+            if pcm_rms_s16le(chunk) >= REALTIME_SPEECH_GATE_RMS_THRESHOLD {
+                self.speech_started = true;
+                outgoing.extend(
+                    self.pending
+                        .chunks(CHUNK_BYTES)
+                        .map(ToOwned::to_owned)
+                        .collect::<Vec<_>>(),
+                );
+                self.pending.clear();
+            }
+        }
+        outgoing
+    }
 }
 
 #[derive(Debug, Default)]
@@ -373,30 +417,24 @@ impl LiveTranscriber for RealtimeTranscriber {
     }
 
     async fn stop(&self, session: Self::Session) -> Result<String> {
-        let _ = session.stop_tx.send(true);
-        let total_audio_bytes = session
-            .sender_task
+        let RealtimeSession {
+            stop_tx,
+            sender_task,
+            receiver_task,
+        } = session;
+        let _ = stop_tx.send(true);
+        let total_audio_bytes = sender_task
             .await
             .context("realtime audio sender task panicked")??;
         if total_audio_bytes == 0 {
-            bail!("recording stopped before any audio was captured");
-        }
-        if !self.final_pass {
-            let mut receiver_task = session.receiver_task;
-            tokio::select! {
-                result = &mut receiver_task => {
-                    match result {
-                        Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {}
-                    }
-                }
-                _ = sleep(REALTIME_NO_FINAL_DRAIN_TIMEOUT) => {
-                    receiver_task.abort();
-                    let _ = receiver_task.await;
-                }
-            }
+            drain_realtime_receiver(receiver_task).await;
             return Ok(String::new());
         }
-        timeout(REALTIME_COMPLETION_TIMEOUT, session.receiver_task)
+        if !self.final_pass {
+            drain_realtime_receiver(receiver_task).await;
+            return Ok(String::new());
+        }
+        timeout(REALTIME_COMPLETION_TIMEOUT, receiver_task)
             .await
             .context("timed out waiting for realtime transcription completion")?
             .context("realtime receiver task panicked")?
@@ -443,9 +481,10 @@ where
     let result = async {
         let mut cursor = 0usize;
         let mut total_sent = 0usize;
+        let mut speech_gate = RealtimeSpeechGate::new(sample_rate);
         loop {
             total_sent +=
-                send_available_realtime_audio(&pcm_session, sample_rate, &mut cursor, sink).await?;
+                send_available_realtime_audio(&pcm_session, sample_rate, &mut cursor, sink, &mut speech_gate).await?;
             if *stop_rx.borrow() {
                 break;
             }
@@ -457,8 +496,15 @@ where
             }
         }
         total_sent +=
-            send_available_realtime_audio(&pcm_session, sample_rate, &mut cursor, sink).await?;
-        if final_pass {
+            send_available_realtime_audio(&pcm_session, sample_rate, &mut cursor, sink, &mut speech_gate).await?;
+        if total_sent == 0 {
+            eprintln!(
+                "speaches-companion realtime audio gate detected no speech; skipping websocket commit"
+            );
+            sink.close()
+                .await
+                .context("failed to close realtime websocket")?;
+        } else if final_pass {
             send_realtime_commit(sink).await?;
         } else {
             sink.close()
@@ -493,6 +539,7 @@ async fn send_available_realtime_audio<S>(
     sample_rate: u32,
     cursor: &mut usize,
     sink: &mut S,
+    speech_gate: &mut RealtimeSpeechGate,
 ) -> Result<usize>
 where
     S: SinkExt<Message> + Unpin,
@@ -501,7 +548,7 @@ where
     let snapshot = pcm_session
         .snapshot_with_preroll_limit(sample_rate, Duration::from_secs(30))
         .await;
-    let chunks = realtime_audio_chunks_since(&snapshot, cursor);
+    let chunks = realtime_audio_chunks_since(&snapshot, cursor, speech_gate);
     let byte_count = chunks.iter().map(Vec::len).sum();
     for chunk in chunks {
         send_realtime_audio_chunk(sink, chunk).await?;
@@ -509,18 +556,59 @@ where
     Ok(byte_count)
 }
 
-fn realtime_audio_chunks_since(snapshot: &[u8], cursor: &mut usize) -> Vec<Vec<u8>> {
+fn realtime_audio_chunks_since(
+    snapshot: &[u8],
+    cursor: &mut usize,
+    speech_gate: &mut RealtimeSpeechGate,
+) -> Vec<Vec<u8>> {
     if *cursor >= snapshot.len() {
         *cursor = snapshot.len();
         return Vec::new();
     }
 
-    let chunks = snapshot[*cursor..]
-        .chunks(CHUNK_BYTES)
-        .map(ToOwned::to_owned)
-        .collect();
+    let chunks = speech_gate.filter_new_audio(&snapshot[*cursor..]);
     *cursor = snapshot.len();
     chunks
+}
+
+async fn drain_realtime_receiver(mut receiver_task: JoinHandle<Result<String>>) {
+    tokio::select! {
+        result = &mut receiver_task => {
+            match result {
+                Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {}
+            }
+        }
+        _ = sleep(REALTIME_NO_FINAL_DRAIN_TIMEOUT) => {
+            receiver_task.abort();
+            let _ = receiver_task.await;
+        }
+    }
+}
+
+fn chunk_bytes_for_duration(sample_rate: u32, duration: Duration) -> usize {
+    ((duration.as_secs_f64() * f64::from(sample_rate)).ceil() as usize * 2).max(2)
+}
+
+fn trim_vec_to_recent(buffer: &mut Vec<u8>, retain_bytes: usize) {
+    let trim_count = buffer.len().saturating_sub(retain_bytes);
+    if trim_count > 0 {
+        buffer.drain(..trim_count);
+    }
+}
+
+fn pcm_rms_s16le(pcm: &[u8]) -> f64 {
+    let mut sum = 0f64;
+    let mut count = 0usize;
+    for sample in pcm.chunks_exact(2) {
+        let sample = i16::from_le_bytes([sample[0], sample[1]]) as f64;
+        sum += sample * sample;
+        count += 1;
+    }
+    if count == 0 {
+        0.0
+    } else {
+        (sum / count as f64).sqrt()
+    }
 }
 
 async fn send_realtime_audio_chunk<S>(sink: &mut S, chunk: Vec<u8>) -> Result<()>
@@ -800,14 +888,31 @@ mod tests {
     fn realtime_audio_chunks_since_returns_only_new_audio() {
         let mut cursor = 0;
         let snapshot = vec![1u8; CHUNK_BYTES + 3];
+        let mut speech_gate = RealtimeSpeechGate::new(SAMPLE_RATE);
+        speech_gate.speech_started = true;
 
-        let chunks = realtime_audio_chunks_since(&snapshot, &mut cursor);
+        let chunks = realtime_audio_chunks_since(&snapshot, &mut cursor, &mut speech_gate);
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].len(), CHUNK_BYTES);
         assert_eq!(chunks[1].len(), 3);
         assert_eq!(cursor, snapshot.len());
-        assert!(realtime_audio_chunks_since(&snapshot, &mut cursor).is_empty());
+        assert!(realtime_audio_chunks_since(&snapshot, &mut cursor, &mut speech_gate).is_empty());
+    }
+
+    #[test]
+    fn realtime_audio_chunks_since_suppresses_noise_until_speech() {
+        let mut cursor = 0;
+        let mut speech_gate = RealtimeSpeechGate::new(SAMPLE_RATE);
+        let noise = vec![0u8; CHUNK_BYTES];
+        let speech = vec![0x20u8; CHUNK_BYTES];
+        let snapshot = [noise, speech].concat();
+
+        let chunks = realtime_audio_chunks_since(&snapshot, &mut cursor, &mut speech_gate);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), CHUNK_BYTES);
+        assert_eq!(chunks[1].len(), CHUNK_BYTES);
     }
 
     #[tokio::test]

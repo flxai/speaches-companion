@@ -832,6 +832,12 @@ impl LiveTranscriber for FinalHttpTranscriber {
             final_audio.trailing_trim.as_secs_f64(),
             final_audio.trailing_silence.as_secs_f64()
         );
+        if final_audio.pcm.is_empty() {
+            eprintln!(
+                "speaches-companion final audio rejected as noise-only; skipping final transcription"
+            );
+            return Ok(String::new());
+        }
         let transcript = transcribe_pcm_snapshot(
             &self.base_url,
             &self.options,
@@ -925,7 +931,7 @@ fn trim_pcm_to_speech(sample_rate: u32, pcm: &[u8]) -> SpeechTrim {
     let frames = rms_frames(sample_rate, pcm);
     if frames.is_empty() {
         return SpeechTrim {
-            pcm: pcm.to_vec(),
+            pcm: Vec::new(),
             leading_trim: Duration::ZERO,
             trailing_trim: Duration::ZERO,
             trailing_silence: Duration::ZERO,
@@ -935,7 +941,7 @@ fn trim_pcm_to_speech(sample_rate: u32, pcm: &[u8]) -> SpeechTrim {
     let threshold = speech_threshold(sample_rate, &frames);
     let Some(first_speech) = frames.iter().position(|frame| frame.rms >= threshold) else {
         return SpeechTrim {
-            pcm: pcm.to_vec(),
+            pcm: Vec::new(),
             leading_trim: Duration::ZERO,
             trailing_trim: Duration::ZERO,
             trailing_silence: pcm_duration(sample_rate, pcm.len()),
@@ -951,7 +957,7 @@ fn trim_pcm_to_speech(sample_rate: u32, pcm: &[u8]) -> SpeechTrim {
         < pcm_bytes_for_duration(sample_rate, TRIM_MIN_SPEECH)
     {
         return SpeechTrim {
-            pcm: pcm.to_vec(),
+            pcm: Vec::new(),
             leading_trim: Duration::ZERO,
             trailing_trim: Duration::ZERO,
             trailing_silence: pcm_duration(sample_rate, pcm.len().saturating_sub(speech_end)),
@@ -1118,25 +1124,41 @@ mod tests {
     }
 
     #[test]
-    fn speech_trimming_falls_back_when_no_speech_is_detected() {
+    fn speech_trimming_rejects_noise_when_no_speech_is_detected() {
         let sample_rate = 1_000;
         let pcm = pcm_for_duration(sample_rate, Duration::from_millis(400), 0);
 
         let trim = trim_pcm_to_speech(sample_rate, &pcm);
 
-        assert_eq!(trim.pcm, pcm);
+        assert!(trim.pcm.is_empty());
         assert_eq!(trim.trailing_silence, Duration::from_millis(400));
     }
 
     #[test]
-    fn final_transcription_audio_preserves_pcm_when_no_speech_is_detected() {
+    fn final_transcription_audio_rejects_noise_when_no_speech_is_detected() {
         let sample_rate = 1_000;
         let pcm = pcm_for_duration(sample_rate, Duration::from_millis(400), 0);
 
         let audio = build_final_transcription_audio(sample_rate, &pcm);
 
-        assert_eq!(audio.pcm, pcm);
-        assert_eq!(audio.audio_duration, Duration::from_millis(400));
+        assert!(audio.pcm.is_empty());
+        assert_eq!(audio.audio_duration, Duration::ZERO);
+    }
+
+    #[test]
+    fn speech_trimming_rejects_too_short_burst() {
+        let sample_rate = 1_000;
+        let pcm = [
+            pcm_for_duration(sample_rate, Duration::from_millis(300), 0),
+            pcm_for_duration(sample_rate, Duration::from_millis(40), 2_000),
+            pcm_for_duration(sample_rate, Duration::from_millis(300), 0),
+        ]
+        .concat();
+
+        let trim = trim_pcm_to_speech(sample_rate, &pcm);
+
+        assert!(trim.pcm.is_empty());
+        assert_eq!(trim.trailing_silence, Duration::from_millis(300));
     }
 
     #[tokio::test]
