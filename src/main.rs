@@ -40,6 +40,7 @@ use speaches_companion::wakeword::{
 const DEFAULT_LISTENING_MARKER: &str = "💬";
 const DEFAULT_INJECT_DELAY_MICROSECS: u32 = 0;
 const DEFAULT_PASTE_SETTLE_DELAY_MS: u64 = DEFAULT_INJECT_PASTE_SETTLE_DELAY_MS;
+const DEFAULT_PASTE_IN_TERMINALS: bool = false;
 const DEFAULT_LEADING_SILENCE_MS: u64 = 250;
 const DEFAULT_PARTIAL_CHUNK_DELAY_MS: u64 = 80;
 const DEFAULT_PARTIAL_CHUNK_MAX_DELAY_MS: u64 = 250;
@@ -122,6 +123,10 @@ struct DaemonArgs {
     inject_delay_microsecs: Option<u32>,
     #[arg(long)]
     paste_settle_delay_ms: Option<u64>,
+    #[arg(long, conflicts_with = "no_paste_in_terminals")]
+    paste_in_terminals: bool,
+    #[arg(long)]
+    no_paste_in_terminals: bool,
     #[arg(long)]
     leading_silence_ms: Option<u64>,
     #[arg(long)]
@@ -201,6 +206,8 @@ struct InjectArgs {
     delay_microsecs: u32,
     #[arg(long, default_value_t = DEFAULT_PASTE_SETTLE_DELAY_MS)]
     paste_settle_delay_ms: u64,
+    #[arg(long, default_value_t = DEFAULT_PASTE_IN_TERMINALS)]
+    paste_in_terminals: bool,
 }
 
 #[derive(Debug, Args)]
@@ -408,9 +415,10 @@ async fn run_wakeword_command(args: WakewordArgs) -> ExitCode {
         },
         append_space: resolve_wakeword_append_space(&args, &file_config),
     };
-    let injector = DesktopTextInjector::new_with_paste_settle_delay(
+    let injector = DesktopTextInjector::new_with_options(
         resolve_wakeword_inject_delay(&args, &file_config),
         resolve_wakeword_paste_settle_delay_ms(&file_config),
+        resolve_wakeword_paste_in_terminals(&file_config),
     );
     match run_wakeword_loop(run_config, injector).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -465,9 +473,10 @@ async fn run_streaming_daemon<L>(
 where
     L: LiveTranscriber + 'static,
 {
-    let injector = DesktopTextInjector::new_with_paste_settle_delay(
+    let injector = DesktopTextInjector::new_with_options(
         daemon_settings.inject_delay_microsecs,
         daemon_settings.paste_settle_delay_ms,
+        daemon_settings.paste_in_terminals,
     );
     let controller = StreamingDictationController::new_with_notifiers(
         transcriber,
@@ -514,6 +523,7 @@ struct DaemonSettings {
     append_space: bool,
     inject_delay_microsecs: u32,
     paste_settle_delay_ms: u64,
+    paste_in_terminals: bool,
     leading_silence_ms: u64,
     preroll_ms: u64,
 }
@@ -552,6 +562,7 @@ fn resolve_daemon_settings(args: &DaemonArgs, file_config: &FileConfig) -> Daemo
             .paste_settle_delay_ms
             .or(file_config.dictation.paste_settle_delay_ms)
             .unwrap_or(DEFAULT_PASTE_SETTLE_DELAY_MS),
+        paste_in_terminals: resolve_paste_in_terminals(args, file_config),
         leading_silence_ms: args
             .leading_silence_ms
             .or(file_config.dictation.leading_silence_ms)
@@ -718,6 +729,26 @@ fn resolve_wakeword_paste_settle_delay_ms(file_config: &FileConfig) -> u64 {
         .unwrap_or(DEFAULT_PASTE_SETTLE_DELAY_MS)
 }
 
+fn resolve_wakeword_paste_in_terminals(file_config: &FileConfig) -> bool {
+    file_config
+        .dictation
+        .paste_in_terminals
+        .unwrap_or(DEFAULT_PASTE_IN_TERMINALS)
+}
+
+fn resolve_paste_in_terminals(args: &DaemonArgs, file_config: &FileConfig) -> bool {
+    if args.paste_in_terminals {
+        true
+    } else if args.no_paste_in_terminals {
+        false
+    } else {
+        file_config
+            .dictation
+            .paste_in_terminals
+            .unwrap_or(DEFAULT_PASTE_IN_TERMINALS)
+    }
+}
+
 async fn run_hotkey_command(args: HotkeyArgs) -> ExitCode {
     run_hotkey_command_with_notifier(args, DesktopErrorNotifier).await
 }
@@ -758,9 +789,10 @@ where
 }
 
 async fn run_inject_command(args: InjectArgs) -> ExitCode {
-    let injector = DesktopTextInjector::new_with_paste_settle_delay(
+    let injector = DesktopTextInjector::new_with_options(
         args.delay_microsecs,
         args.paste_settle_delay_ms,
+        args.paste_in_terminals,
     );
     match injector.inject_text(&args.text) {
         Ok(()) => ExitCode::SUCCESS,
@@ -1136,6 +1168,7 @@ mod tests {
             settings.paste_settle_delay_ms,
             DEFAULT_PASTE_SETTLE_DELAY_MS
         );
+        assert_eq!(settings.paste_in_terminals, DEFAULT_PASTE_IN_TERMINALS);
         assert!(settings.final_pass);
         assert!(settings.append_space);
         assert_eq!(settings.preroll_ms, DEFAULT_PREROLL_MS);
@@ -1179,6 +1212,7 @@ mod tests {
                 append_space: Some(false),
                 inject_delay_microsecs: Some(3_000),
                 paste_settle_delay_ms: Some(450),
+                paste_in_terminals: Some(true),
                 leading_silence_ms: Some(400),
                 preroll_ms: Some(1_000),
             },
@@ -1201,6 +1235,7 @@ mod tests {
         assert!(!settings.append_space);
         assert_eq!(settings.inject_delay_microsecs, 3_000);
         assert_eq!(settings.paste_settle_delay_ms, 450);
+        assert!(settings.paste_in_terminals);
         assert_eq!(settings.leading_silence_ms, 400);
         assert_eq!(settings.preroll_ms, 1_000);
     }
@@ -1320,6 +1355,24 @@ mod tests {
         let settings = resolve_daemon_settings(&args, &FileConfig::default());
 
         assert_eq!(settings.paste_settle_delay_ms, 450);
+    }
+
+    #[test]
+    fn daemon_accepts_terminal_paste_flags() {
+        let args = parse_daemon_args(["speaches-companion", "daemon", "--paste-in-terminals"]);
+        let settings = resolve_daemon_settings(&args, &FileConfig::default());
+        assert!(settings.paste_in_terminals);
+
+        let args = parse_daemon_args(["speaches-companion", "daemon", "--no-paste-in-terminals"]);
+        let file_config = FileConfig {
+            dictation: DictationFileConfig {
+                paste_in_terminals: Some(true),
+                ..DictationFileConfig::default()
+            },
+            ..FileConfig::default()
+        };
+        let settings = resolve_daemon_settings(&args, &file_config);
+        assert!(!settings.paste_in_terminals);
     }
 
     #[test]

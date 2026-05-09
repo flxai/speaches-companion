@@ -183,6 +183,7 @@ partial_chunk_max_delay_ms = 120
 append_space = false
 inject_delay_microsecs = 3000
 paste_settle_delay_ms = 450
+paste_in_terminals = true
 leading_silence_ms = 400
 preroll_ms = 1000
 
@@ -230,6 +231,7 @@ press_enter = true
     assert_eq!(config.dictation.append_space, Some(false));
     assert_eq!(config.dictation.inject_delay_microsecs, Some(3_000));
     assert_eq!(config.dictation.paste_settle_delay_ms, Some(450));
+    assert_eq!(config.dictation.paste_in_terminals, Some(true));
     assert_eq!(config.dictation.leading_silence_ms, Some(400));
     assert_eq!(config.dictation.preroll_ms, Some(1000));
     assert_eq!(

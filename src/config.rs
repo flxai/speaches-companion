@@ -70,6 +70,7 @@ pub struct DictationFileConfig {
     pub append_space: Option<bool>,
     pub inject_delay_microsecs: Option<u32>,
     pub paste_settle_delay_ms: Option<u64>,
+    pub paste_in_terminals: Option<bool>,
     pub leading_silence_ms: Option<u64>,
     pub preroll_ms: Option<u64>,
 }

@@ -43,24 +43,36 @@ pub trait TextInjector: Send + Sync {
 pub struct DesktopTextInjector {
     delay_microsecs: u32,
     paste_settle_delay_ms: u64,
+    paste_in_terminals: bool,
 }
 
 impl DesktopTextInjector {
     pub fn new(delay_microsecs: u32) -> Self {
-        Self::new_with_paste_settle_delay(delay_microsecs, DEFAULT_PASTE_SETTLE_DELAY_MS)
+        Self::new_with_options(delay_microsecs, DEFAULT_PASTE_SETTLE_DELAY_MS, false)
     }
 
     pub fn new_with_paste_settle_delay(delay_microsecs: u32, paste_settle_delay_ms: u64) -> Self {
+        Self::new_with_options(delay_microsecs, paste_settle_delay_ms, false)
+    }
+
+    pub fn new_with_options(
+        delay_microsecs: u32,
+        paste_settle_delay_ms: u64,
+        paste_in_terminals: bool,
+    ) -> Self {
         Self {
             delay_microsecs,
             paste_settle_delay_ms,
+            paste_in_terminals,
         }
     }
 
     fn backend(&self) -> DesktopTextBackend {
-        if let Some(injector) =
-            SwayTextInjector::detect(self.delay_microsecs, self.paste_settle_delay_ms)
-        {
+        if let Some(injector) = SwayTextInjector::detect(
+            self.delay_microsecs,
+            self.paste_settle_delay_ms,
+            self.paste_in_terminals,
+        ) {
             DesktopTextBackend::Sway(injector)
         } else {
             DesktopTextBackend::X11(LibXdoTextInjector::new(self.delay_microsecs))
@@ -205,6 +217,7 @@ impl TextInjector for LibXdoTextInjector {
 pub struct SwayTextInjector {
     delay_millis: u32,
     paste_settle_delay_ms: u64,
+    paste_in_terminals: bool,
     sway_socket: PathBuf,
     wayland_display: Option<String>,
     swaymsg_path: PathBuf,
@@ -214,13 +227,18 @@ pub struct SwayTextInjector {
 }
 
 impl SwayTextInjector {
-    pub fn detect(delay_microsecs: u32, paste_settle_delay_ms: u64) -> Option<Self> {
+    pub fn detect(
+        delay_microsecs: u32,
+        paste_settle_delay_ms: u64,
+        paste_in_terminals: bool,
+    ) -> Option<Self> {
         let sway_socket = default_sway_socket_path()?;
         let wayland_display =
             default_wayland_display().or_else(|| wayland_display_from_sway_process(&sway_socket));
         Some(Self {
             delay_millis: delay_microsecs.div_ceil(1000),
             paste_settle_delay_ms,
+            paste_in_terminals,
             sway_socket,
             wayland_display,
             swaymsg_path: PathBuf::from("swaymsg"),
@@ -284,7 +302,12 @@ impl SwayTextInjector {
         }
     }
 
-    fn add_wtype_paste_args(&self, command: &mut Command, erase_count: usize) {
+    fn add_wtype_paste_args(
+        &self,
+        command: &mut Command,
+        erase_count: usize,
+        paste_mode: PasteMode,
+    ) {
         self.add_wtype_timing_args(command, self.delay_millis);
         for _ in 0..erase_count {
             command.arg("-k").arg("BackSpace");
@@ -292,15 +315,15 @@ impl SwayTextInjector {
         if self.delay_millis > 0 && erase_count > 0 {
             command.arg("-s").arg(self.delay_millis.to_string());
         }
-        command
-            .arg("-M")
-            .arg("ctrl")
-            .arg("-P")
-            .arg("v")
-            .arg("-p")
-            .arg("v")
-            .arg("-m")
-            .arg("ctrl");
+        command.arg("-M").arg("ctrl");
+        if matches!(paste_mode, PasteMode::Terminal) {
+            command.arg("-M").arg("shift");
+        }
+        command.arg("-P").arg("v").arg("-p").arg("v");
+        if matches!(paste_mode, PasteMode::Terminal) {
+            command.arg("-m").arg("shift");
+        }
+        command.arg("-m").arg("ctrl");
     }
 
     fn run_wtype_with_text(&self, text: &str) -> anyhow::Result<()> {
@@ -312,9 +335,9 @@ impl SwayTextInjector {
     }
 
     fn run_hybrid_replacement(&self, erase_count: usize, text_suffix: &str) -> anyhow::Result<()> {
-        let prefers_paste = self.should_paste_suffix(text_suffix)?;
-        if prefers_paste {
-            match self.try_clipboard_replacement(erase_count, text_suffix) {
+        let paste_mode = self.paste_mode_for_suffix(text_suffix)?;
+        if let Some(paste_mode) = paste_mode {
+            match self.try_clipboard_replacement(erase_count, text_suffix, paste_mode) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
                 Err(error) => {
@@ -325,7 +348,11 @@ impl SwayTextInjector {
             }
         }
 
-        let typed_delay_millis = if prefers_paste { 0 } else { self.delay_millis };
+        let typed_delay_millis = if paste_mode.is_some() {
+            0
+        } else {
+            self.delay_millis
+        };
         self.run_wtype_typed_replacement(erase_count, text_suffix, typed_delay_millis)
     }
 
@@ -377,6 +404,7 @@ impl SwayTextInjector {
         &self,
         erase_count: usize,
         text_suffix: &str,
+        paste_mode: PasteMode,
     ) -> anyhow::Result<bool> {
         let snapshot = self.clipboard_snapshot()?;
         if matches!(snapshot, ClipboardSnapshot::NonText) {
@@ -384,7 +412,7 @@ impl SwayTextInjector {
         };
 
         self.copy_text_to_clipboard(text_suffix.as_bytes())?;
-        let paste_result = self.run_wtype_paste(erase_count);
+        let paste_result = self.run_wtype_paste(erase_count, paste_mode);
         self.wait_for_paste_delivery();
         if let Err(error) = self.restore_clipboard(snapshot) {
             eprintln!("speaches-companion failed to restore clipboard: {error:#}");
@@ -393,12 +421,16 @@ impl SwayTextInjector {
         Ok(true)
     }
 
-    fn should_paste_suffix(&self, text_suffix: &str) -> anyhow::Result<bool> {
+    fn paste_mode_for_suffix(&self, text_suffix: &str) -> anyhow::Result<Option<PasteMode>> {
         if text_suffix.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
 
-        Ok(!self.focused_target_is_terminal()?)
+        if self.focused_target_is_terminal()? {
+            Ok(self.paste_in_terminals.then_some(PasteMode::Terminal))
+        } else {
+            Ok(Some(PasteMode::Gui))
+        }
     }
 
     fn focused_target_is_terminal(&self) -> anyhow::Result<bool> {
@@ -428,9 +460,9 @@ impl SwayTextInjector {
         serde_json::from_slice(&output.stdout).context("failed to parse sway tree JSON")
     }
 
-    fn run_wtype_paste(&self, erase_count: usize) -> anyhow::Result<()> {
+    fn run_wtype_paste(&self, erase_count: usize, paste_mode: PasteMode) -> anyhow::Result<()> {
         let mut command = self.wtype_command();
-        self.add_wtype_paste_args(&mut command, erase_count);
+        self.add_wtype_paste_args(&mut command, erase_count, paste_mode);
         let status = command
             .status()
             .with_context(|| format!("failed to start {}", self.wtype_path.display()))?;
@@ -591,6 +623,12 @@ enum ClipboardSnapshot {
     Empty,
     Text(Vec<u8>),
     NonText,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PasteMode {
+    Gui,
+    Terminal,
 }
 
 fn default_sway_socket_path() -> Option<PathBuf> {
@@ -1194,7 +1232,7 @@ mod tests {
         let injector = test_sway_injector(20);
         let mut command = injector.wtype_command();
 
-        injector.add_wtype_paste_args(&mut command, 2);
+        injector.add_wtype_paste_args(&mut command, 2, PasteMode::Gui);
 
         assert_eq!(
             command_args(&command),
@@ -1215,6 +1253,42 @@ mod tests {
                 "v",
                 "-p",
                 "v",
+                "-m",
+                "ctrl"
+            ]
+        );
+    }
+
+    #[test]
+    fn sway_terminal_paste_command_uses_ctrl_shift_v() {
+        let injector = test_sway_injector(20);
+        let mut command = injector.wtype_command();
+
+        injector.add_wtype_paste_args(&mut command, 2, PasteMode::Terminal);
+
+        assert_eq!(
+            command_args(&command),
+            vec![
+                "-s",
+                "20",
+                "-d",
+                "20",
+                "-k",
+                "BackSpace",
+                "-k",
+                "BackSpace",
+                "-s",
+                "20",
+                "-M",
+                "ctrl",
+                "-M",
+                "shift",
+                "-P",
+                "v",
+                "-p",
+                "v",
+                "-m",
+                "shift",
                 "-m",
                 "ctrl"
             ]
@@ -1277,6 +1351,7 @@ mod tests {
         SwayTextInjector {
             delay_millis,
             paste_settle_delay_ms: DEFAULT_PASTE_SETTLE_DELAY_MS,
+            paste_in_terminals: false,
             sway_socket: PathBuf::from("/run/user/1001/sway-ipc.1001.42.sock"),
             wayland_display: None,
             swaymsg_path: PathBuf::from("swaymsg"),

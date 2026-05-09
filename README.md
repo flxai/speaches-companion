@@ -74,6 +74,7 @@ inline_partials = true
 append_space = true
 inject_delay_microsecs = 3000
 paste_settle_delay_ms = 450
+paste_in_terminals = true
 leading_silence_ms = 250
 preroll_ms = 750
 
@@ -126,8 +127,10 @@ Text payloads are injected through Sway/wtype when a Sway IPC socket is
 available, otherwise through libxdo text entry with active modifiers temporarily
 cleared. Speculative replacement uses Backspace for the portion that changed.
 On Sway, text suffixes are pasted as temporary clipboard chunks outside terminal
-windows; terminal windows still use virtual key typing. Some browser text fields
-drop characters when virtual keyboard events arrive too quickly; set
+windows. Set `paste_in_terminals = true` or pass `--paste-in-terminals` if you
+want terminal emulators to use clipboard paste too, typically via `Ctrl+Shift+V`,
+instead of virtual key typing. Some browser text fields drop characters when
+virtual keyboard events arrive too quickly; set
 `inject_delay_microsecs` or pass `--inject-delay-microsecs` to add a per-key
 delay for virtual key typing. Use `paste_settle_delay_ms` or
 `--paste-settle-delay-ms` to keep the temporary clipboard around longer after a
