@@ -17,6 +17,10 @@ pub struct FocusedWindow(pub u64);
 pub trait TextInjector: Send + Sync {
     fn inject_text(&self, text: &str) -> anyhow::Result<()>;
 
+    fn should_show_listening_marker(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+
     fn press_enter(&self) -> anyhow::Result<()> {
         self.inject_text("\n")
     }
@@ -99,6 +103,13 @@ impl TextInjector for DesktopTextBackend {
         }
     }
 
+    fn should_show_listening_marker(&self) -> anyhow::Result<bool> {
+        match self {
+            Self::Sway(injector) => injector.should_show_listening_marker(),
+            Self::X11(injector) => injector.should_show_listening_marker(),
+        }
+    }
+
     fn press_enter(&self) -> anyhow::Result<()> {
         match self {
             Self::Sway(injector) => injector.press_enter(),
@@ -131,6 +142,10 @@ impl TextInjector for DesktopTextBackend {
 impl TextInjector for DesktopTextInjector {
     fn inject_text(&self, text: &str) -> anyhow::Result<()> {
         self.backend().inject_text(text)
+    }
+
+    fn should_show_listening_marker(&self) -> anyhow::Result<bool> {
+        self.backend().should_show_listening_marker()
     }
 
     fn press_enter(&self) -> anyhow::Result<()> {
@@ -595,6 +610,14 @@ impl TextInjector for SwayTextInjector {
     fn inject_text(&self, text: &str) -> anyhow::Result<()> {
         self.run_wtype_with_text(text)
             .context("sway/wtype text injection failed")
+    }
+
+    fn should_show_listening_marker(&self) -> anyhow::Result<bool> {
+        if self.paste_in_terminals && self.focused_target_is_terminal()? {
+            Ok(false)
+        } else {
+            Ok(true)
+        }
     }
 
     fn press_enter(&self) -> anyhow::Result<()> {
