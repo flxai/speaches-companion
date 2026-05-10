@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use serde::Deserialize;
 use url::Url;
 
+use crate::clock::unix_millis;
+use crate::text::{non_empty_str, non_empty_string};
 use crate::wakeword::{OpenWakewordStockModel, WakewordEngine};
 
 pub const DEFAULT_BASE_URL: &str = "http://ono.tail:8000";
@@ -343,30 +344,8 @@ fn choose_vec(cli: Vec<String>, env: Option<Vec<String>>, file: Vec<String>) -> 
     Vec::new()
 }
 
-fn non_empty_string(value: String) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-fn non_empty_str(value: &str) -> Option<&str> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
 fn default_trace_path() -> PathBuf {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
     PathBuf::from("target")
         .join("speaches-companion-traces")
-        .join(format!("dictate-live-{millis}.jsonl"))
+        .join(format!("dictate-live-{}.jsonl", unix_millis()))
 }

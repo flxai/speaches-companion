@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod clock;
 pub mod config;
 pub mod daemon;
 pub mod dictation;
@@ -12,6 +13,7 @@ pub mod shell;
 pub mod speech;
 pub mod streaming;
 pub mod stt;
+pub mod text;
 pub mod trace;
 pub mod tts;
 pub mod wakeword;

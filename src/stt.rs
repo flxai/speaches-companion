@@ -5,6 +5,8 @@ use reqwest::multipart::{Form, Part};
 use reqwest::Url;
 use serde::Deserialize;
 
+use crate::text::non_empty_str;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseFormat {
     Json,
@@ -172,13 +174,4 @@ fn transcription_url(base_url: &str) -> anyhow::Result<Url> {
     url.set_path("/v1/audio/transcriptions");
     url.set_query(None);
     Ok(url)
-}
-
-fn non_empty_str(value: &str) -> Option<&str> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
 }

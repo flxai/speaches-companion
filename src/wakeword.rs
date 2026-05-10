@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{bail, Context};
 use clap::ValueEnum;
@@ -16,6 +16,7 @@ use crate::audio::{
     pcm_bytes_for_duration, snapshot_streaming_pcm, start_streaming_pcm_capture, write_pcm_wav,
     SharedPcmBuffer, StreamingPcmCapture, StreamingPcmSession, STT_SAMPLE_RATE,
 };
+use crate::clock::unix_millis;
 use crate::daemon::{DaemonResponse, HotkeyHandler};
 use crate::inject::{format_transcript_for_injection, TextInjector};
 use crate::ipc::IpcCommand;
@@ -1084,7 +1085,8 @@ async fn transcribe_wake_recording(
     config: &WakewordRunConfig,
     pcm: &[u8],
 ) -> anyhow::Result<String> {
-    let path = std::env::temp_dir().join(format!("speaches-companion-wakeword-{}.wav", unix_ms()));
+    let path =
+        std::env::temp_dir().join(format!("speaches-companion-wakeword-{}.wav", unix_millis()));
     write_pcm_wav(&path, pcm, STT_SAMPLE_RATE).await?;
     let result = transcribe_file(&config.base_url, &path, &config.stt_options).await;
     let cleanup = tokio::fs::remove_file(&path).await;
@@ -1159,13 +1161,6 @@ fn frame_count(buffer: &[f32], frame_width: usize) -> usize {
 
 fn samples_for_duration(sample_rate: u32, duration: Duration) -> usize {
     pcm_bytes_for_duration(sample_rate, duration) / 2
-}
-
-fn unix_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
 }
 
 #[cfg(test)]

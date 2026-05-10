@@ -4,7 +4,6 @@ use std::os::fd::AsRawFd;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use reqwest::Client;
@@ -12,6 +11,8 @@ use serde::Serialize;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 use url::Url;
+
+use crate::clock::unix_millis;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpeechOptions {
@@ -127,7 +128,7 @@ pub async fn write_speech_temp_file(
     let path = std::env::temp_dir().join(format!(
         "speaches-companion-tts-{}-{}.{}",
         std::process::id(),
-        current_millis(),
+        unix_millis(),
         speech_file_extension(response_format)
     ));
     tokio::fs::write(&path, audio)
@@ -313,11 +314,4 @@ fn terminate_process_group(pid: i32, signal: i32) {
 
 fn process_exists(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
-}
-
-fn current_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0)
 }

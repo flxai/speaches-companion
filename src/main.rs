@@ -25,6 +25,7 @@ use speaches_companion::streaming::{
     FinalHttpTranscriber, LiveTranscriber, PartialChunkingConfig, StreamingDictationController,
 };
 use speaches_companion::stt::{transcribe_file, ResponseFormat, TranscribeOptions};
+use speaches_companion::text::non_empty_string;
 use speaches_companion::tts::{
     normalize_read_aloud_text, play_audio_file, selected_or_clipboard_text, synthesize_speech,
     write_speech_temp_file, SpeechOptions,
@@ -1082,15 +1083,6 @@ fn tts_config_input(cli: TtsCliConfigInput, file_config: &FileConfig) -> TtsConf
         file_response_format: file_config.tts.response_format.clone(),
         file_player: file_config.tts.player.clone(),
         file_player_args: file_config.tts.player_args.clone(),
-    }
-}
-
-fn non_empty_string(value: String) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
     }
 }
 

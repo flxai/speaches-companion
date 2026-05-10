@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
 use crate::audio::{
     start_raw_pcm_recording, stop_raw_pcm_recording, RawPcmRecording, STT_SAMPLE_RATE,
 };
+use crate::clock::unix_millis;
 use crate::daemon::{DaemonResponse, HotkeyHandler};
 use crate::inject::{format_transcript_for_injection, TextInjector};
 use crate::ipc::IpcCommand;
@@ -241,9 +241,9 @@ pub fn default_recording_dir() -> PathBuf {
 }
 
 fn recording_file_name() -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default();
-    format!("speaches-companion-{}-{millis}.wav", std::process::id())
+    format!(
+        "speaches-companion-{}-{}.wav",
+        std::process::id(),
+        unix_millis()
+    )
 }
