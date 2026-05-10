@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -43,6 +46,9 @@ const OPENWAKEWORD_MEL_BINS: usize = 32;
 const OPENWAKEWORD_MEL_WINDOW_FRAMES: usize = 76;
 const OPENWAKEWORD_MELSPEC_MAX_FRAMES: usize = 970;
 const OPENWAKEWORD_EMBEDDING_STEP_FRAMES: usize = 8;
+const WAKEWORD_ACTIVITY_STATE_FILE_ENV: &str = "SPEACHES_COMPANION_WAKEWORD_ACTIVITY_STATE_FILE";
+const WAKEWORD_ACTIVITY_REFRESH_COMMAND_ENV: &str =
+    "SPEACHES_COMPANION_WAKEWORD_ACTIVITY_REFRESH_COMMAND";
 const OPENWAKEWORD_EMBEDDING_DIM: usize = 96;
 const OPENWAKEWORD_FEATURE_MAX_FRAMES: usize = 120;
 const OPENWAKEWORD_RAW_BUFFER_MAX_SAMPLES: usize = STT_SAMPLE_RATE as usize * 10;
@@ -756,6 +762,78 @@ fn log_wakeword_ready(settings: &WakewordSettings, paths: &WakewordPaths) {
     );
 }
 
+#[derive(Debug, Clone)]
+struct WakewordActivityReporter {
+    state_file: Option<PathBuf>,
+    refresh_command: Option<String>,
+}
+
+impl WakewordActivityReporter {
+    fn from_env() -> Self {
+        Self {
+            state_file: env::var_os(WAKEWORD_ACTIVITY_STATE_FILE_ENV)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+            refresh_command: env::var(WAKEWORD_ACTIVITY_REFRESH_COMMAND_ENV)
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+        }
+    }
+
+    fn set_recording(&self) {
+        self.set_state("recording");
+    }
+
+    fn set_waiting(&self) {
+        self.set_state("waiting");
+    }
+
+    fn clear(&self) {
+        if let Some(state_file) = &self.state_file {
+            if let Err(error) = fs::remove_file(state_file) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "speaches-companion wakeword failed to clear activity state {}: {error}",
+                        state_file.display()
+                    );
+                }
+            }
+        }
+        self.refresh();
+    }
+
+    fn set_state(&self, state: &str) {
+        if let Some(state_file) = &self.state_file {
+            if let Some(parent) = state_file.parent() {
+                if let Err(error) = fs::create_dir_all(parent) {
+                    eprintln!(
+                        "speaches-companion wakeword failed to create activity state dir {}: {error}",
+                        parent.display()
+                    );
+                    self.refresh();
+                    return;
+                }
+            }
+            if let Err(error) = fs::write(state_file, format!("{state}\n")) {
+                eprintln!(
+                    "speaches-companion wakeword failed to write activity state {}: {error}",
+                    state_file.display()
+                );
+            }
+        }
+        self.refresh();
+    }
+
+    fn refresh(&self) {
+        let Some(command) = &self.refresh_command else {
+            return;
+        };
+        if let Err(error) = Command::new("/bin/sh").arg("-c").arg(command).status() {
+            eprintln!("speaches-companion wakeword failed to refresh activity status: {error}");
+        }
+    }
+}
+
 pub async fn run_wakeword_loop_with_scorer<S, I>(
     config: WakewordRunConfig,
     scorer: S,
@@ -788,6 +866,7 @@ where
     S: WakeScorer,
     I: TextInjector + Clone + Send + 'static,
 {
+    let activity = WakewordActivityReporter::from_env();
     loop {
         let detection = wait_for_wake(&shared_pcm, detector, &config.settings).await?;
         eprintln!(
@@ -798,21 +877,17 @@ where
             notify_wakeword_detected(config.settings.name.clone(), detection.score);
         }
         if let Some(streaming) = config.streaming.as_ref() {
-            run_streaming_wake_recording(&shared_pcm, &config, streaming.clone(), injector.clone())
-                .await?;
+            run_streaming_wake_recording(
+                &shared_pcm,
+                &config,
+                streaming.clone(),
+                injector.clone(),
+                &activity,
+            )
+            .await?;
             continue;
         }
-        let pcm = record_until_silence(&shared_pcm, &config.settings).await?;
-        if pcm.is_empty() {
-            continue;
-        }
-        let transcript = transcribe_wake_recording(&config, &pcm).await?;
-        if let Some(text) = format_transcript_for_injection(&transcript, config.append_space) {
-            injector.inject_text(&text)?;
-            if config.settings.press_enter {
-                injector.press_enter()?;
-            }
-        }
+        run_final_wake_recording(&shared_pcm, &config, injector.clone(), &activity).await?;
     }
 }
 
@@ -821,6 +896,7 @@ async fn run_streaming_wake_recording<I>(
     config: &WakewordRunConfig,
     streaming: WakewordStreamingConfig,
     injector: I,
+    activity: &WakewordActivityReporter,
 ) -> anyhow::Result<()>
 where
     I: TextInjector + Clone + Send + 'static,
@@ -832,17 +908,61 @@ where
         .with_final_transcript(streaming.final_transcript)
         .with_append_space(config.append_space);
 
-    controller.handle_hotkey(IpcCommand::HotkeyDown).await?;
+    activity.set_recording();
+    if let Err(error) = controller.handle_hotkey(IpcCommand::HotkeyDown).await {
+        activity.clear();
+        return Err(error);
+    }
     let saw_speech = wait_for_recording_silence(shared_pcm, &config.settings).await;
+    activity.set_waiting();
     let stop_result = controller.handle_hotkey(IpcCommand::HotkeyUp).await;
 
-    let saw_speech = saw_speech?;
-    let stop_response = stop_result?;
-    if saw_speech && config.settings.press_enter && matches!(stop_response, DaemonResponse::Stopped)
-    {
-        injector.press_enter()?;
+    let result = async {
+        let saw_speech = saw_speech?;
+        let stop_response = stop_result?;
+        if saw_speech
+            && config.settings.press_enter
+            && matches!(stop_response, DaemonResponse::Stopped)
+        {
+            injector.press_enter()?;
+        }
+        Ok(())
     }
-    Ok(())
+    .await;
+    activity.clear();
+    result
+}
+
+async fn run_final_wake_recording<I>(
+    shared_pcm: &SharedPcmBuffer,
+    config: &WakewordRunConfig,
+    injector: I,
+    activity: &WakewordActivityReporter,
+) -> anyhow::Result<()>
+where
+    I: TextInjector + Clone + Send + 'static,
+{
+    activity.set_recording();
+    let pcm = record_until_silence(shared_pcm, &config.settings).await;
+    activity.set_waiting();
+
+    let result = async {
+        let pcm = pcm?;
+        if pcm.is_empty() {
+            return Ok(());
+        }
+        let transcript = transcribe_wake_recording(config, &pcm).await?;
+        if let Some(text) = format_transcript_for_injection(&transcript, config.append_space) {
+            injector.inject_text(&text)?;
+            if config.settings.press_enter {
+                injector.press_enter()?;
+            }
+        }
+        Ok(())
+    }
+    .await;
+    activity.clear();
+    result
 }
 
 fn notify_wakeword_detected(name: String, score: f32) {
