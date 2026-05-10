@@ -977,6 +977,48 @@ fn notify_wakeword_detected(name: String, score: f32) {
     }));
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RecordingSilenceTracker {
+    started: Instant,
+    last_speech: Instant,
+    saw_speech: bool,
+}
+
+impl RecordingSilenceTracker {
+    fn new(started: Instant) -> Self {
+        Self {
+            started,
+            last_speech: started,
+            saw_speech: false,
+        }
+    }
+
+    fn observe(&mut self, heard_speech: bool, now: Instant) {
+        if heard_speech {
+            self.saw_speech = true;
+            self.last_speech = now;
+        }
+    }
+
+    fn should_stop(self, now: Instant, settings: &WakewordSettings) -> bool {
+        if self.saw_speech && now.duration_since(self.last_speech) >= settings.silence_timeout {
+            return true;
+        }
+        if !self.saw_speech && now.duration_since(self.started) >= settings.activation_grace {
+            return true;
+        }
+        now.duration_since(self.started) >= settings.max_recording
+    }
+
+    fn saw_speech(self) -> bool {
+        self.saw_speech
+    }
+}
+
+fn wakeword_poll_interval(settings: &WakewordSettings) -> Duration {
+    (settings.frame / 2).max(Duration::from_millis(10))
+}
+
 pub async fn wait_for_wake<S>(
     shared_pcm: &SharedPcmBuffer,
     detector: &mut WakeDetector<S>,
@@ -995,7 +1037,7 @@ where
         if let Some(detection) = detector.observe_pcm(new_pcm)? {
             return Ok(detection);
         }
-        sleep((settings.frame / 2).max(Duration::from_millis(10))).await;
+        sleep(wakeword_poll_interval(settings)).await;
     }
 }
 
@@ -1007,35 +1049,24 @@ pub async fn record_until_silence(
     let speech_detector = SpeechActivityDetector::with_initial_noise(STT_SAMPLE_RATE, &baseline);
     let session =
         StreamingPcmSession::start(shared_pcm.clone(), STT_SAMPLE_RATE, Duration::ZERO).await?;
-    let started = Instant::now();
+    let mut tracker = RecordingSilenceTracker::new(Instant::now());
     let mut cursor = 0usize;
-    let mut saw_speech = false;
-    let mut last_speech = started;
 
     loop {
-        sleep((settings.frame / 2).max(Duration::from_millis(10))).await;
+        sleep(wakeword_poll_interval(settings)).await;
         let snapshot = session.snapshot().await;
         let new_pcm = &snapshot[cursor.min(snapshot.len())..];
         cursor = snapshot.len();
-        if speech_detector.has_speech(new_pcm) {
-            saw_speech = true;
-            last_speech = Instant::now();
-        }
         let now = Instant::now();
-        if saw_speech && now.duration_since(last_speech) >= settings.silence_timeout {
-            break;
-        }
-        if !saw_speech && now.duration_since(started) >= settings.activation_grace {
-            break;
-        }
-        if now.duration_since(started) >= settings.max_recording {
+        tracker.observe(speech_detector.has_speech(new_pcm), now);
+        if tracker.should_stop(now, settings) {
             break;
         }
     }
 
     let pcm = session.snapshot().await;
     session.finish().await;
-    if saw_speech {
+    if tracker.saw_speech() {
         Ok(pcm)
     } else {
         Ok(Vec::new())
@@ -1046,39 +1077,28 @@ async fn wait_for_recording_silence(
     shared_pcm: &SharedPcmBuffer,
     settings: &WakewordSettings,
 ) -> anyhow::Result<bool> {
-    let started = Instant::now();
+    let mut tracker = RecordingSilenceTracker::new(Instant::now());
     let initial_snapshot = snapshot_streaming_pcm(shared_pcm).await;
     let speech_detector =
         SpeechActivityDetector::with_initial_noise(STT_SAMPLE_RATE, &initial_snapshot.pcm);
     let mut cursor = initial_snapshot.bytes_seen;
-    let mut saw_speech = false;
-    let mut last_speech = started;
 
     loop {
-        sleep((settings.frame / 2).max(Duration::from_millis(10))).await;
+        sleep(wakeword_poll_interval(settings)).await;
         let snapshot = snapshot_streaming_pcm(shared_pcm).await;
         let buffer_start = snapshot.bytes_seen.saturating_sub(snapshot.pcm.len());
         let start = cursor.saturating_sub(buffer_start).min(snapshot.pcm.len());
         let new_pcm = &snapshot.pcm[start..];
         cursor = snapshot.bytes_seen;
 
-        if speech_detector.has_speech(new_pcm) {
-            saw_speech = true;
-            last_speech = Instant::now();
-        }
         let now = Instant::now();
-        if saw_speech && now.duration_since(last_speech) >= settings.silence_timeout {
-            break;
-        }
-        if !saw_speech && now.duration_since(started) >= settings.activation_grace {
-            break;
-        }
-        if now.duration_since(started) >= settings.max_recording {
+        tracker.observe(speech_detector.has_speech(new_pcm), now);
+        if tracker.should_stop(now, settings) {
             break;
         }
     }
 
-    Ok(saw_speech)
+    Ok(tracker.saw_speech())
 }
 
 async fn transcribe_wake_recording(
