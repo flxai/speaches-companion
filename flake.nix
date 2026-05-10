@@ -313,7 +313,7 @@ PY
 
       commonArgs = {
         pname = "speaches-companion";
-        version = "0.4.0";
+        version = "0.4.1";
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
         buildFeatures = [
