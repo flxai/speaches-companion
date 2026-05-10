@@ -21,6 +21,7 @@ use crate::inject::{format_transcript_for_injection, TextInjector};
 use crate::ipc::IpcCommand;
 use crate::notification::{DesktopWakewordNotifier, WakewordNotifier};
 use crate::realtime::RealtimeTranscriber;
+use crate::speech::{pcm_s16le_samples, SpeechActivityDetector};
 use crate::streaming::{PartialChunkingConfig, StreamingDictationController};
 use crate::stt::{transcribe_file, TranscribeOptions};
 
@@ -53,7 +54,6 @@ const OPENWAKEWORD_EMBEDDING_DIM: usize = 96;
 const OPENWAKEWORD_FEATURE_MAX_FRAMES: usize = 120;
 const OPENWAKEWORD_RAW_BUFFER_MAX_SAMPLES: usize = STT_SAMPLE_RATE as usize * 10;
 const OPENWAKEWORD_WARMUP_WINDOWS: usize = 5;
-const SPEECH_RMS_THRESHOLD: f64 = 700.0;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -1002,6 +1002,8 @@ pub async fn record_until_silence(
     shared_pcm: &SharedPcmBuffer,
     settings: &WakewordSettings,
 ) -> anyhow::Result<Vec<u8>> {
+    let baseline = snapshot_streaming_pcm(shared_pcm).await.pcm;
+    let speech_detector = SpeechActivityDetector::with_initial_noise(STT_SAMPLE_RATE, &baseline);
     let session =
         StreamingPcmSession::start(shared_pcm.clone(), STT_SAMPLE_RATE, Duration::ZERO).await?;
     let started = Instant::now();
@@ -1014,7 +1016,7 @@ pub async fn record_until_silence(
         let snapshot = session.snapshot().await;
         let new_pcm = &snapshot[cursor.min(snapshot.len())..];
         cursor = snapshot.len();
-        if rms_s16le(new_pcm) >= SPEECH_RMS_THRESHOLD {
+        if speech_detector.has_speech(new_pcm) {
             saw_speech = true;
             last_speech = Instant::now();
         }
@@ -1044,7 +1046,10 @@ async fn wait_for_recording_silence(
     settings: &WakewordSettings,
 ) -> anyhow::Result<bool> {
     let started = Instant::now();
-    let mut cursor = snapshot_streaming_pcm(shared_pcm).await.bytes_seen;
+    let initial_snapshot = snapshot_streaming_pcm(shared_pcm).await;
+    let speech_detector =
+        SpeechActivityDetector::with_initial_noise(STT_SAMPLE_RATE, &initial_snapshot.pcm);
+    let mut cursor = initial_snapshot.bytes_seen;
     let mut saw_speech = false;
     let mut last_speech = started;
 
@@ -1056,7 +1061,7 @@ async fn wait_for_recording_silence(
         let new_pcm = &snapshot.pcm[start..];
         cursor = snapshot.bytes_seen;
 
-        if rms_s16le(new_pcm) >= SPEECH_RMS_THRESHOLD {
+        if speech_detector.has_speech(new_pcm) {
             saw_speech = true;
             last_speech = Instant::now();
         }
@@ -1156,26 +1161,6 @@ fn samples_for_duration(sample_rate: u32, duration: Duration) -> usize {
     pcm_bytes_for_duration(sample_rate, duration) / 2
 }
 
-fn pcm_s16le_samples(pcm: &[u8]) -> impl Iterator<Item = i16> + '_ {
-    pcm.chunks_exact(2)
-        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
-}
-
-fn rms_s16le(pcm: &[u8]) -> f64 {
-    let mut sum = 0f64;
-    let mut count = 0usize;
-    for sample in pcm_s16le_samples(pcm) {
-        let value = f64::from(sample);
-        sum += value * value;
-        count += 1;
-    }
-    if count == 0 {
-        0.0
-    } else {
-        (sum / count as f64).sqrt()
-    }
-}
-
 fn unix_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1188,7 +1173,7 @@ mod tests {
     use super::*;
     use crate::audio::{append_test_streaming_pcm, new_test_shared_pcm_buffer};
     use tempfile::tempdir;
-    use tokio::time::Instant;
+    use tokio::time::{advance, Instant};
 
     #[derive(Debug)]
     struct FakeScorer {
@@ -1297,6 +1282,55 @@ mod tests {
 
         assert_eq!(detection, WakeDetection { score: 0.9 });
         assert!(started.elapsed() >= Duration::from_millis(80));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn record_until_silence_uses_retained_noise_floor() {
+        let shared_pcm = new_test_shared_pcm_buffer(STT_SAMPLE_RATE, Duration::from_secs(5));
+        append_test_streaming_pcm(
+            &shared_pcm,
+            &pcm_for_duration(STT_SAMPLE_RATE, Duration::from_secs(1), 800),
+        )
+        .await;
+
+        let writer_pcm = shared_pcm.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(10)).await;
+            append_test_streaming_pcm(
+                &writer_pcm,
+                &pcm_for_duration(STT_SAMPLE_RATE, Duration::from_millis(20), 800),
+            )
+            .await;
+        });
+
+        let settings = WakewordSettings {
+            name: "default".to_string(),
+            engine: WakewordEngine::Openwakeword,
+            stock_model: DEFAULT_OPENWAKEWORD_STOCK_MODEL,
+            assets_dir: None,
+            root_dir: PathBuf::from("/tmp/wakewords"),
+            threshold: DEFAULT_WAKEWORD_THRESHOLD,
+            frame: Duration::from_millis(20),
+            silence_timeout: Duration::from_millis(40),
+            activation_grace: Duration::from_millis(100),
+            max_recording: Duration::from_secs(1),
+            press_enter: DEFAULT_WAKEWORD_PRESS_ENTER,
+        };
+        let recording =
+            tokio::spawn(async move { record_until_silence(&shared_pcm, &settings).await });
+
+        advance(Duration::from_millis(200)).await;
+
+        assert!(recording.await.unwrap().unwrap().is_empty());
+    }
+
+    fn pcm_for_duration(sample_rate: u32, duration: Duration, amplitude: i16) -> Vec<u8> {
+        let samples = samples_for_duration(sample_rate, duration);
+        let mut pcm = Vec::with_capacity(samples * 2);
+        for _ in 0..samples {
+            pcm.extend_from_slice(&amplitude.to_le_bytes());
+        }
+        pcm
     }
 
     #[test]

@@ -12,8 +12,8 @@ use tokio::time::Instant;
 #[cfg(feature = "debug-recordings")]
 use crate::audio::write_pcm_mp3;
 use crate::audio::{
-    start_streaming_pcm_capture, write_pcm_wav, SharedPcmBuffer, StreamingPcmCapture,
-    StreamingPcmSession, STT_SAMPLE_RATE,
+    pcm_bytes_for_duration, pcm_duration, start_streaming_pcm_capture, write_pcm_wav,
+    SharedPcmBuffer, StreamingPcmCapture, StreamingPcmSession, STT_SAMPLE_RATE,
 };
 use crate::daemon::{DaemonResponse, HotkeyHandler};
 use crate::inject::{
@@ -25,17 +25,16 @@ use crate::notification::{
     dictation_error_body, ErrorNotifier, NoopErrorNotifier, NoopTranscriptNotifier,
     TranscriptNotifier, DICTATION_ERROR_SUMMARY,
 };
+use crate::speech::{
+    adaptive_speech_threshold, rms_frames, DEFAULT_MIN_SPEECH_DURATION,
+    DEFAULT_SPEECH_ANALYSIS_FRAME,
+};
 use crate::stt::{transcribe_file, TranscribeOptions};
 
 static TEMP_AUDIO_COUNTER: AtomicU64 = AtomicU64::new(0);
 const TRANSCRIBER_WARMUP_DURATION: Duration = Duration::from_millis(500);
 const TRIM_LEADING_PAD: Duration = Duration::from_millis(500);
 const TRIM_TRAILING_PAD: Duration = Duration::from_millis(300);
-const TRIM_ANALYSIS_FRAME: Duration = Duration::from_millis(20);
-const TRIM_MIN_SPEECH: Duration = Duration::from_millis(120);
-const FIXED_SPEECH_RMS_FLOOR: f64 = 700.0;
-const MAX_SPEECH_RMS_FLOOR: f64 = 1_500.0;
-const NOISE_FLOOR_MULTIPLIER: f64 = 4.0;
 pub const DEFAULT_PARTIAL_CHUNK_DELAY: Duration = Duration::from_millis(80);
 pub const DEFAULT_PARTIAL_CHUNK_MAX_DELAY: Duration = Duration::from_millis(250);
 
@@ -909,13 +908,6 @@ struct SpeechTrim {
     trailing_silence: Duration,
 }
 
-#[derive(Debug, Clone)]
-struct RmsFrame {
-    start: usize,
-    end: usize,
-    rms: f64,
-}
-
 fn build_final_transcription_audio(sample_rate: u32, pcm: &[u8]) -> TranscriptionAudio {
     let trim = trim_pcm_to_speech(sample_rate, pcm);
     TranscriptionAudio {
@@ -928,7 +920,7 @@ fn build_final_transcription_audio(sample_rate: u32, pcm: &[u8]) -> Transcriptio
 }
 
 fn trim_pcm_to_speech(sample_rate: u32, pcm: &[u8]) -> SpeechTrim {
-    let frames = rms_frames(sample_rate, pcm);
+    let frames = rms_frames(sample_rate, pcm, DEFAULT_SPEECH_ANALYSIS_FRAME);
     if frames.is_empty() {
         return SpeechTrim {
             pcm: Vec::new(),
@@ -938,7 +930,7 @@ fn trim_pcm_to_speech(sample_rate: u32, pcm: &[u8]) -> SpeechTrim {
         };
     }
 
-    let threshold = speech_threshold(sample_rate, &frames);
+    let threshold = adaptive_speech_threshold(sample_rate, &frames);
     let Some(first_speech) = frames.iter().position(|frame| frame.rms >= threshold) else {
         return SpeechTrim {
             pcm: Vec::new(),
@@ -954,7 +946,7 @@ fn trim_pcm_to_speech(sample_rate: u32, pcm: &[u8]) -> SpeechTrim {
     let speech_start = frames[first_speech].start;
     let speech_end = frames[last_speech].end;
     if speech_end.saturating_sub(speech_start)
-        < pcm_bytes_for_duration(sample_rate, TRIM_MIN_SPEECH)
+        < pcm_bytes_for_duration(sample_rate, DEFAULT_MIN_SPEECH_DURATION)
     {
         return SpeechTrim {
             pcm: Vec::new(),
@@ -974,55 +966,6 @@ fn trim_pcm_to_speech(sample_rate: u32, pcm: &[u8]) -> SpeechTrim {
         leading_trim: pcm_duration(sample_rate, padded_start),
         trailing_trim: pcm_duration(sample_rate, pcm.len().saturating_sub(padded_end)),
         trailing_silence: pcm_duration(sample_rate, pcm.len().saturating_sub(speech_end)),
-    }
-}
-
-fn rms_frames(sample_rate: u32, pcm: &[u8]) -> Vec<RmsFrame> {
-    let frame_bytes = pcm_bytes_for_duration(sample_rate, TRIM_ANALYSIS_FRAME).max(2);
-    let mut frames = Vec::new();
-    let mut start = 0usize;
-    while start + 2 <= pcm.len() {
-        let end = (start + frame_bytes).min(pcm.len());
-        frames.push(RmsFrame {
-            start,
-            end,
-            rms: pcm_rms(&pcm[start..end]),
-        });
-        start = end;
-    }
-    frames
-}
-
-fn speech_threshold(sample_rate: u32, frames: &[RmsFrame]) -> f64 {
-    let noise_sample_bytes = pcm_bytes_for_duration(sample_rate, Duration::from_secs(1));
-    let noise_frames = frames
-        .iter()
-        .take_while(|frame| frame.start < noise_sample_bytes)
-        .collect::<Vec<_>>();
-    if noise_frames.is_empty() {
-        return FIXED_SPEECH_RMS_FLOOR;
-    }
-
-    let noise_floor =
-        noise_frames.iter().map(|frame| frame.rms).sum::<f64>() / noise_frames.len() as f64;
-    FIXED_SPEECH_RMS_FLOOR
-        .max(noise_floor * NOISE_FLOOR_MULTIPLIER)
-        .min(MAX_SPEECH_RMS_FLOOR)
-}
-
-fn pcm_rms(pcm: &[u8]) -> f64 {
-    let mut sum = 0f64;
-    let mut count = 0usize;
-    for sample in pcm.chunks_exact(2) {
-        let sample = i16::from_le_bytes([sample[0], sample[1]]) as f64;
-        sum += sample * sample;
-        count += 1;
-    }
-
-    if count == 0 {
-        0.0
-    } else {
-        (sum / count as f64).sqrt()
     }
 }
 
@@ -1078,21 +1021,11 @@ fn audio_file_name(label: &str) -> String {
     )
 }
 
-fn pcm_bytes_for_duration(sample_rate: u32, duration: Duration) -> usize {
-    let samples = duration.as_secs_f64() * f64::from(sample_rate);
-    samples.ceil() as usize * 2
-}
-
 fn pcm_with_leading_silence(sample_rate: u32, duration: Duration, pcm: &[u8]) -> Vec<u8> {
     let silence_bytes = pcm_bytes_for_duration(sample_rate, duration);
     let mut padded_pcm = vec![0; silence_bytes];
     padded_pcm.extend_from_slice(pcm);
     padded_pcm
-}
-
-fn pcm_duration(sample_rate: u32, byte_len: usize) -> Duration {
-    let samples = byte_len / 2;
-    Duration::from_secs_f64(samples as f64 / f64::from(sample_rate))
 }
 
 fn temp_audio_path(label: &str) -> PathBuf {

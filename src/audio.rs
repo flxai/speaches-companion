@@ -376,6 +376,11 @@ pub fn pcm_bytes_for_duration(sample_rate: u32, duration: Duration) -> usize {
     samples.ceil() as usize * usize::from(CHANNELS) * 2
 }
 
+pub fn pcm_duration(sample_rate: u32, byte_len: usize) -> Duration {
+    let samples = byte_len / 2 / usize::from(CHANNELS);
+    Duration::from_secs_f64(samples as f64 / f64::from(sample_rate))
+}
+
 pub async fn stop_streaming_pcm_capture(mut capture: StreamingPcmCapture) -> Result<Vec<u8>> {
     if let Some(child) = capture.child.as_mut() {
         let _ = child.start_kill();

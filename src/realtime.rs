@@ -15,12 +15,13 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::audio::{
-    capture_with_pw_record, start_streaming_pcm_capture, SharedPcmBuffer, StreamingPcmCapture,
-    StreamingPcmSession, CHANNELS, CHUNK_BYTES, SAMPLE_RATE,
+    capture_with_pw_record, pcm_bytes_for_duration, pcm_duration, start_streaming_pcm_capture,
+    SharedPcmBuffer, StreamingPcmCapture, StreamingPcmSession, CHUNK_BYTES, SAMPLE_RATE,
 };
 use crate::config::{health_url, realtime_ws_url, DictateLiveConfig};
 use crate::event::{classify_event, RealtimeEvent, RealtimeHypothesis};
 use crate::phase::{PhaseGate, PhaseResult};
+use crate::speech::{pcm_rms_s16le, DEFAULT_SPEECH_ANALYSIS_FRAME, DEFAULT_SPEECH_RMS_FLOOR};
 #[cfg(feature = "debug-recordings")]
 use crate::streaming::preserve_recording_snapshot;
 use crate::streaming::{LiveTranscriber, LiveTranscriptUpdate, LiveTranscriptionSession};
@@ -31,8 +32,8 @@ const REALTIME_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 const REALTIME_NO_FINAL_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const REALTIME_AUDIO_POLL: Duration = Duration::from_millis(40);
 const REALTIME_SPEECH_GATE_PREROLL: Duration = Duration::from_millis(300);
-const REALTIME_SPEECH_GATE_RMS_THRESHOLD: f64 = 700.0;
-const REALTIME_SPEECH_GATE_FRAME: Duration = Duration::from_millis(20);
+const REALTIME_SPEECH_GATE_RMS_THRESHOLD: f64 = DEFAULT_SPEECH_RMS_FLOOR;
+const REALTIME_SPEECH_GATE_FRAME: Duration = DEFAULT_SPEECH_ANALYSIS_FRAME;
 const REALTIME_SPEECH_GATE_MIN_SPEECH: Duration = Duration::from_millis(160);
 
 pub struct RunOutcome {
@@ -72,7 +73,8 @@ impl RealtimeSpeechGate {
         Self {
             speech_started: false,
             pending: Vec::new(),
-            max_pending_bytes: chunk_bytes_for_duration(sample_rate, REALTIME_SPEECH_GATE_PREROLL),
+            max_pending_bytes: pcm_bytes_for_duration(sample_rate, REALTIME_SPEECH_GATE_PREROLL)
+                .max(2),
         }
     }
 
@@ -596,13 +598,10 @@ async fn drain_realtime_receiver(mut receiver_task: JoinHandle<Result<String>>) 
     }
 }
 
-fn chunk_bytes_for_duration(sample_rate: u32, duration: Duration) -> usize {
-    ((duration.as_secs_f64() * f64::from(sample_rate)).ceil() as usize * 2).max(2)
-}
-
 fn pending_contains_sustained_speech(pcm: &[u8]) -> bool {
-    let frame_bytes = chunk_bytes_for_duration(SAMPLE_RATE, REALTIME_SPEECH_GATE_FRAME);
-    let min_speech_bytes = chunk_bytes_for_duration(SAMPLE_RATE, REALTIME_SPEECH_GATE_MIN_SPEECH);
+    let frame_bytes = pcm_bytes_for_duration(SAMPLE_RATE, REALTIME_SPEECH_GATE_FRAME).max(2);
+    let min_speech_bytes =
+        pcm_bytes_for_duration(SAMPLE_RATE, REALTIME_SPEECH_GATE_MIN_SPEECH).max(2);
     let mut sustained_bytes = 0usize;
 
     for frame in pcm.chunks(frame_bytes) {
@@ -623,21 +622,6 @@ fn trim_vec_to_recent(buffer: &mut Vec<u8>, retain_bytes: usize) {
     let trim_count = buffer.len().saturating_sub(retain_bytes);
     if trim_count > 0 {
         buffer.drain(..trim_count);
-    }
-}
-
-fn pcm_rms_s16le(pcm: &[u8]) -> f64 {
-    let mut sum = 0f64;
-    let mut count = 0usize;
-    for sample in pcm.chunks_exact(2) {
-        let sample = i16::from_le_bytes([sample[0], sample[1]]) as f64;
-        sum += sample * sample;
-        count += 1;
-    }
-    if count == 0 {
-        0.0
-    } else {
-        (sum / count as f64).sqrt()
     }
 }
 
@@ -749,16 +733,6 @@ pub async fn run_dictate_live(config: DictateLiveConfig) -> Result<RunOutcome> {
         trace_path: config.trace_path,
         total_audio_bytes,
     })
-}
-
-fn pcm_bytes_for_duration(sample_rate: u32, duration: Duration) -> usize {
-    let samples = duration.as_secs_f64() * f64::from(sample_rate);
-    samples.ceil() as usize * usize::from(CHANNELS) * 2
-}
-
-fn pcm_duration(sample_rate: u32, byte_len: usize) -> Duration {
-    let samples = byte_len / 2 / usize::from(CHANNELS);
-    Duration::from_secs_f64(samples as f64 / f64::from(sample_rate))
 }
 
 fn websocket_text(message: Message) -> Result<Option<String>> {
