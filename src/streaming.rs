@@ -535,6 +535,22 @@ where
                 };
                 match command {
                     PartialTextCommand::FlushPending { ack } => {
+                        while updates_open {
+                            match updates.try_recv() {
+                                Ok(update) => {
+                                    if let Some(transcript) =
+                                        normalize_transcript_for_injection(&update.transcript)
+                                    {
+                                        display_state.update_latest_partial(transcript);
+                                    }
+                                }
+                                Err(mpsc::error::TryRecvError::Empty) => break,
+                                Err(mpsc::error::TryRecvError::Disconnected) => {
+                                    updates_open = false;
+                                    break;
+                                }
+                            }
+                        }
                         let result = if display_state.has_pending_partial() {
                             display_state.flush_display(
                                 &mut text_session,

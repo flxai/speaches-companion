@@ -625,8 +625,7 @@ async fn streaming_trailing_space_can_be_disabled() {
     assert_eq!(
         *operations.lock().unwrap(),
         vec![
-            InjectOperation::Type("hel".to_string()),
-            InjectOperation::Type("lo win".to_string()),
+            InjectOperation::Type("hello win".to_string()),
             InjectOperation::Type("dow".to_string()),
         ]
     );
