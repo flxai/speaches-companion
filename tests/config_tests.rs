@@ -199,6 +199,7 @@ silence_timeout_ms = 900
 activation_grace_ms = 5000
 max_recording_ms = 30000
 press_enter = true
+notify_on_detect = true
 "#,
     )
     .unwrap();
@@ -255,6 +256,7 @@ press_enter = true
     assert_eq!(config.wakeword.activation_grace_ms, Some(5000));
     assert_eq!(config.wakeword.max_recording_ms, Some(30000));
     assert_eq!(config.wakeword.press_enter, Some(true));
+    assert_eq!(config.wakeword.notify_on_detect, Some(true));
 }
 
 #[cfg(feature = "debug-recordings")]

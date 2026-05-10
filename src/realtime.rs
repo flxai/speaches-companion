@@ -309,21 +309,19 @@ impl RealtimeTranscriber {
         *capture = Some(started_capture);
         Ok(shared_pcm)
     }
-}
 
-#[async_trait::async_trait]
-impl LiveTranscriber for RealtimeTranscriber {
-    type Session = RealtimeSession;
-
-    async fn start(&self) -> Result<LiveTranscriptionSession<Self::Session>> {
-        let shared_pcm = self.ensure_capture_started().await?;
-        let pcm_session =
-            StreamingPcmSession::start(shared_pcm, self.sample_rate, self.preroll).await?;
+    async fn start_on_shared_pcm(
+        &self,
+        shared_pcm: SharedPcmBuffer,
+        preroll: Duration,
+        label: &str,
+    ) -> Result<LiveTranscriptionSession<RealtimeSession>> {
+        let pcm_session = StreamingPcmSession::start(shared_pcm, self.sample_rate, preroll).await?;
         eprintln!(
-            "speaches-companion realtime hotkey-down audio buffer: {:.2}s available; retained {:.2}s pre-roll (requested {}ms)",
+            "speaches-companion {label} audio buffer: {:.2}s available; retained {:.2}s pre-roll (requested {}ms)",
             pcm_duration(self.sample_rate, pcm_session.available_at_start_bytes()).as_secs_f64(),
             pcm_duration(self.sample_rate, pcm_session.retained_preroll_bytes()).as_secs_f64(),
-            self.preroll.as_millis()
+            preroll.as_millis()
         );
         let ws_url = realtime_ws_url(&self.base_url, &self.model, self.language.as_deref())?;
         let (ws_stream, _) = match connect_async(&ws_url).await {
@@ -416,6 +414,17 @@ impl LiveTranscriber for RealtimeTranscriber {
             },
             updates: updates_rx,
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl LiveTranscriber for RealtimeTranscriber {
+    type Session = RealtimeSession;
+
+    async fn start(&self) -> Result<LiveTranscriptionSession<Self::Session>> {
+        let shared_pcm = self.ensure_capture_started().await?;
+        self.start_on_shared_pcm(shared_pcm, self.preroll, "realtime hotkey-down")
+            .await
     }
 
     async fn stop(&self, session: Self::Session) -> Result<String> {

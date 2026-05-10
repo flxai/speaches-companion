@@ -13,7 +13,12 @@ use crate::audio::{
     pcm_bytes_for_duration, snapshot_streaming_pcm, start_streaming_pcm_capture, write_pcm_wav,
     SharedPcmBuffer, StreamingPcmCapture, StreamingPcmSession, STT_SAMPLE_RATE,
 };
+use crate::daemon::{DaemonResponse, HotkeyHandler};
 use crate::inject::{format_transcript_for_injection, TextInjector};
+use crate::ipc::IpcCommand;
+use crate::notification::{DesktopWakewordNotifier, WakewordNotifier};
+use crate::realtime::RealtimeTranscriber;
+use crate::streaming::{PartialChunkingConfig, StreamingDictationController};
 use crate::stt::{transcribe_file, TranscribeOptions};
 
 pub const DEFAULT_WAKEWORD_NAME: &str = "default";
@@ -101,12 +106,23 @@ pub struct WakeDetection {
     pub score: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WakewordRunConfig {
     pub settings: WakewordSettings,
     pub base_url: String,
     pub stt_options: TranscribeOptions,
     pub append_space: bool,
+    pub notify_on_detect: bool,
+    pub streaming: Option<WakewordStreamingConfig>,
+}
+
+#[derive(Clone)]
+pub struct WakewordStreamingConfig {
+    pub transcriber: RealtimeTranscriber,
+    pub listening_marker: Option<String>,
+    pub inline_partials: bool,
+    pub partial_chunking: PartialChunkingConfig,
+    pub final_transcript: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -712,19 +728,32 @@ async fn download_openwakeword_asset(asset_name: &str, destination: &Path) -> an
 
 pub async fn run_wakeword_loop<I>(config: WakewordRunConfig, injector: I) -> anyhow::Result<()>
 where
-    I: TextInjector,
+    I: TextInjector + Clone + Send + 'static,
 {
     let paths = ensure_wakeword_model(&config.settings).await?;
     match config.settings.engine {
         WakewordEngine::Onnx => {
             let scorer = OnnxWakeScorer::load(&paths.model_path, config.settings.frame)?;
+            log_wakeword_ready(&config.settings, &paths);
             run_wakeword_loop_with_scorer(config, scorer, injector).await
         }
         WakewordEngine::Openwakeword => {
             let scorer = OpenWakewordPipelineScorer::load(&paths)?;
+            log_wakeword_ready(&config.settings, &paths);
             run_wakeword_loop_with_scorer(config, scorer, injector).await
         }
     }
+}
+
+fn log_wakeword_ready(settings: &WakewordSettings, paths: &WakewordPaths) {
+    eprintln!(
+        "speaches-companion wakeword '{}' listening: engine={:?} model={} threshold={:.3} frame_ms={}",
+        settings.name,
+        settings.engine,
+        paths.model_path.display(),
+        settings.threshold,
+        settings.frame.as_millis()
+    );
 }
 
 pub async fn run_wakeword_loop_with_scorer<S, I>(
@@ -734,7 +763,7 @@ pub async fn run_wakeword_loop_with_scorer<S, I>(
 ) -> anyhow::Result<()>
 where
     S: WakeScorer,
-    I: TextInjector,
+    I: TextInjector + Clone + Send + 'static,
 {
     let _paths = wakeword_paths(&config.settings)?;
     let capture = start_streaming_pcm_capture(
@@ -757,7 +786,7 @@ async fn run_wakeword_loop_on_capture<S, I>(
 ) -> anyhow::Result<()>
 where
     S: WakeScorer,
-    I: TextInjector,
+    I: TextInjector + Clone + Send + 'static,
 {
     loop {
         let detection = wait_for_wake(&shared_pcm, detector, &config.settings).await?;
@@ -765,6 +794,14 @@ where
             "speaches-companion wakeword '{}' detected with score {:.3}",
             config.settings.name, detection.score
         );
+        if config.notify_on_detect {
+            notify_wakeword_detected(config.settings.name.clone(), detection.score);
+        }
+        if let Some(streaming) = config.streaming.as_ref() {
+            run_streaming_wake_recording(&shared_pcm, &config, streaming.clone(), injector.clone())
+                .await?;
+            continue;
+        }
         let pcm = record_until_silence(&shared_pcm, &config.settings).await?;
         if pcm.is_empty() {
             continue;
@@ -777,6 +814,44 @@ where
             }
         }
     }
+}
+
+async fn run_streaming_wake_recording<I>(
+    shared_pcm: &SharedPcmBuffer,
+    config: &WakewordRunConfig,
+    streaming: WakewordStreamingConfig,
+    injector: I,
+) -> anyhow::Result<()>
+where
+    I: TextInjector + Clone + Send + 'static,
+{
+    let mut controller = StreamingDictationController::new(streaming.transcriber, injector.clone())
+        .with_listening_marker(streaming.listening_marker)
+        .with_inline_partials(streaming.inline_partials)
+        .with_partial_chunking_config(streaming.partial_chunking)
+        .with_final_transcript(streaming.final_transcript)
+        .with_append_space(config.append_space);
+
+    controller.handle_hotkey(IpcCommand::HotkeyDown).await?;
+    let saw_speech = wait_for_recording_silence(shared_pcm, &config.settings).await;
+    let stop_result = controller.handle_hotkey(IpcCommand::HotkeyUp).await;
+
+    let saw_speech = saw_speech?;
+    let stop_response = stop_result?;
+    if saw_speech && config.settings.press_enter && matches!(stop_response, DaemonResponse::Stopped)
+    {
+        injector.press_enter()?;
+    }
+    Ok(())
+}
+
+fn notify_wakeword_detected(name: String, score: f32) {
+    let _ = tokio::task::spawn_blocking(move || {
+        let notifier = DesktopWakewordNotifier;
+        if let Err(error) = notifier.notify_detected(&name, score) {
+            eprintln!("speaches-companion wakeword notification failed: {error:#}");
+        }
+    });
 }
 
 pub async fn wait_for_wake<S>(
@@ -840,6 +915,42 @@ pub async fn record_until_silence(
     } else {
         Ok(Vec::new())
     }
+}
+
+async fn wait_for_recording_silence(
+    shared_pcm: &SharedPcmBuffer,
+    settings: &WakewordSettings,
+) -> anyhow::Result<bool> {
+    let started = Instant::now();
+    let mut cursor = snapshot_streaming_pcm(shared_pcm).await.bytes_seen;
+    let mut saw_speech = false;
+    let mut last_speech = started;
+
+    loop {
+        sleep((settings.frame / 2).max(Duration::from_millis(10))).await;
+        let snapshot = snapshot_streaming_pcm(shared_pcm).await;
+        let buffer_start = snapshot.bytes_seen.saturating_sub(snapshot.pcm.len());
+        let start = cursor.saturating_sub(buffer_start).min(snapshot.pcm.len());
+        let new_pcm = &snapshot.pcm[start..];
+        cursor = snapshot.bytes_seen;
+
+        if rms_s16le(new_pcm) >= SPEECH_RMS_THRESHOLD {
+            saw_speech = true;
+            last_speech = Instant::now();
+        }
+        let now = Instant::now();
+        if saw_speech && now.duration_since(last_speech) >= settings.silence_timeout {
+            break;
+        }
+        if !saw_speech && now.duration_since(started) >= settings.activation_grace {
+            break;
+        }
+        if now.duration_since(started) >= settings.max_recording {
+            break;
+        }
+    }
+
+    Ok(saw_speech)
 }
 
 async fn transcribe_wake_recording(

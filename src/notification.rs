@@ -5,7 +5,9 @@ pub const DICTATION_PARTIAL_SUMMARY: &str = "Speaches Companion dictating";
 pub const DICTATION_FINAL_SUMMARY: &str = "Speaches Companion dictation";
 pub const HOTKEY_ERROR_SUMMARY: &str = "Speaches Companion hotkey failed";
 pub const READ_ALOUD_ERROR_SUMMARY: &str = "Speaches Companion read-aloud failed";
+pub const WAKEWORD_DETECTED_SUMMARY: &str = "Speaches Companion wakeword";
 const TRANSCRIPT_NOTIFICATION_ID: u32 = 0x7472_6563;
+const WAKEWORD_NOTIFICATION_ID: u32 = 0x7761_6b65;
 
 pub trait ErrorNotifier: Send + Sync {
     fn notify_error(&self, summary: &str, body: &str) -> anyhow::Result<()>;
@@ -37,6 +39,36 @@ impl ErrorNotifier for DesktopErrorNotifier {
 
 pub fn dictation_error_body(stage: &str, error: &anyhow::Error) -> String {
     format!("{stage}: {error:#}")
+}
+
+pub trait WakewordNotifier: Send + Sync {
+    fn notify_detected(&self, name: &str, score: f32) -> anyhow::Result<()>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopWakewordNotifier;
+
+impl WakewordNotifier for NoopWakewordNotifier {
+    fn notify_detected(&self, _name: &str, _score: f32) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DesktopWakewordNotifier;
+
+impl WakewordNotifier for DesktopWakewordNotifier {
+    fn notify_detected(&self, name: &str, score: f32) -> anyhow::Result<()> {
+        Notification::new()
+            .appname("Speaches Companion")
+            .id(WAKEWORD_NOTIFICATION_ID)
+            .summary(WAKEWORD_DETECTED_SUMMARY)
+            .body(&format!("'{name}' detected with score {score:.3}"))
+            .urgency(Urgency::Normal)
+            .timeout(Timeout::Milliseconds(2_000))
+            .show()?;
+        Ok(())
+    }
 }
 
 pub trait TranscriptNotifier: Clone + Send + Sync + 'static {

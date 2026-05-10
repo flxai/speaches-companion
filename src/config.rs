@@ -88,6 +88,7 @@ pub struct WakewordFileConfig {
     pub activation_grace_ms: Option<u64>,
     pub max_recording_ms: Option<u64>,
     pub press_enter: Option<bool>,
+    pub notify_on_detect: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -31,7 +31,7 @@ use speaches_companion::tts::{
 };
 use speaches_companion::wakeword::{
     default_wakeword_root, run_wakeword_loop, OpenWakewordStockModel, WakewordEngine,
-    WakewordRunConfig, WakewordSettings, DEFAULT_OPENWAKEWORD_STOCK_MODEL,
+    WakewordRunConfig, WakewordSettings, WakewordStreamingConfig, DEFAULT_OPENWAKEWORD_STOCK_MODEL,
     DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS, DEFAULT_WAKEWORD_FRAME_MS,
     DEFAULT_WAKEWORD_MAX_RECORDING_MS, DEFAULT_WAKEWORD_NAME, DEFAULT_WAKEWORD_PRESS_ENTER,
     DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS, DEFAULT_WAKEWORD_THRESHOLD,
@@ -46,6 +46,7 @@ const DEFAULT_PARTIAL_CHUNK_DELAY_MS: u64 = 80;
 const DEFAULT_PARTIAL_CHUNK_MAX_DELAY_MS: u64 = 250;
 const DEFAULT_PARTIAL_CHUNKING: bool = true;
 const DEFAULT_PREROLL_MS: u64 = 750;
+const DEFAULT_WAKEWORD_NOTIFY_ON_DETECT: bool = false;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -186,6 +187,10 @@ struct WakewordArgs {
     append_space: bool,
     #[arg(long)]
     no_append_space: bool,
+    #[arg(long, conflicts_with = "no_notify_on_detect")]
+    notify_on_detect: bool,
+    #[arg(long)]
+    no_notify_on_detect: bool,
     #[arg(long)]
     inject_delay_microsecs: Option<u32>,
 }
@@ -400,6 +405,13 @@ async fn run_wakeword_command(args: WakewordArgs) -> ExitCode {
         &file_config,
     ));
     let settings = resolve_wakeword_settings(&args, &file_config);
+    let streaming = match build_wakeword_streaming_config(&config, &file_config).await {
+        Ok(streaming) => streaming,
+        Err(error) => {
+            eprintln!("speaches-companion wakeword realtime startup failed: {error:#}");
+            return ExitCode::from(1);
+        }
+    };
     let run_config = WakewordRunConfig {
         settings,
         base_url: config.base_url,
@@ -413,6 +425,8 @@ async fn run_wakeword_command(args: WakewordArgs) -> ExitCode {
             stream: false,
         },
         append_space: resolve_wakeword_append_space(&args, &file_config),
+        notify_on_detect: resolve_wakeword_notify_on_detect(&args, &file_config),
+        streaming,
     };
     let injector = DesktopTextInjector::new_with_options(
         resolve_wakeword_inject_delay(&args, &file_config),
@@ -462,6 +476,59 @@ where
         .context("realtime transcription backend is unavailable")?;
     eprintln!("speaches-companion realtime transcription backend ready");
     Ok(transcriber)
+}
+
+async fn build_wakeword_streaming_config(
+    config: &speaches_companion::config::DictateLiveConfig,
+    file_config: &FileConfig,
+) -> anyhow::Result<Option<WakewordStreamingConfig>> {
+    if !file_config.dictation.realtime_partials.unwrap_or(false) {
+        return Ok(None);
+    }
+
+    let final_pass = file_config.dictation.final_pass.unwrap_or(true);
+    let transcriber = RealtimeTranscriber::new(
+        config.base_url.clone(),
+        config.model.clone(),
+        config.language.clone(),
+    )
+    // Wake detection uses a separate 16 kHz capture; do not feed the wake phrase
+    // from realtime pre-roll into the dictated command.
+    .with_preroll(Duration::ZERO)
+    .with_final_pass(final_pass);
+    #[cfg(feature = "debug-recordings")]
+    let transcriber = transcriber.with_record_dir(file_config.dictation.record_dir.clone());
+    let transcriber = prepare_realtime_daemon_transcriber(transcriber).await?;
+
+    Ok(Some(WakewordStreamingConfig {
+        transcriber,
+        listening_marker: file_config
+            .dictation
+            .listening_marker
+            .clone()
+            .or_else(|| Some(DEFAULT_LISTENING_MARKER.to_string()))
+            .and_then(non_empty_string),
+        inline_partials: file_config.dictation.inline_partials.unwrap_or(true),
+        partial_chunking: PartialChunkingConfig {
+            enabled: file_config
+                .dictation
+                .partial_chunking
+                .unwrap_or(DEFAULT_PARTIAL_CHUNKING),
+            delay: Duration::from_millis(
+                file_config
+                    .dictation
+                    .partial_chunk_delay_ms
+                    .unwrap_or(DEFAULT_PARTIAL_CHUNK_DELAY_MS),
+            ),
+            max_delay: Duration::from_millis(
+                file_config
+                    .dictation
+                    .partial_chunk_max_delay_ms
+                    .unwrap_or(DEFAULT_PARTIAL_CHUNK_MAX_DELAY_MS),
+            ),
+        },
+        final_transcript: final_pass,
+    }))
 }
 
 async fn run_streaming_daemon<L>(
@@ -716,6 +783,19 @@ fn resolve_wakeword_append_space(args: &WakewordArgs, file_config: &FileConfig) 
         false
     } else {
         file_config.dictation.append_space.unwrap_or(true)
+    }
+}
+
+fn resolve_wakeword_notify_on_detect(args: &WakewordArgs, file_config: &FileConfig) -> bool {
+    if args.notify_on_detect {
+        true
+    } else if args.no_notify_on_detect {
+        false
+    } else {
+        file_config
+            .wakeword
+            .notify_on_detect
+            .unwrap_or(DEFAULT_WAKEWORD_NOTIFY_ON_DETECT)
     }
 }
 
@@ -1409,6 +1489,10 @@ mod tests {
             Duration::from_millis(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS)
         );
         assert!(settings.press_enter);
+        assert!(!resolve_wakeword_notify_on_detect(
+            &args,
+            &FileConfig::default()
+        ));
     }
 
     #[test]
@@ -1427,6 +1511,7 @@ mod tests {
                 activation_grace_ms: Some(4_000),
                 max_recording_ms: Some(20_000),
                 press_enter: Some(false),
+                notify_on_detect: Some(true),
             },
             ..FileConfig::default()
         };
@@ -1447,6 +1532,7 @@ mod tests {
         assert_eq!(settings.activation_grace, Duration::from_millis(4_000));
         assert_eq!(settings.max_recording, Duration::from_millis(20_000));
         assert!(!settings.press_enter);
+        assert!(resolve_wakeword_notify_on_detect(&args, &file_config));
     }
 
     #[test]
@@ -1482,6 +1568,7 @@ mod tests {
             "--threshold",
             "0.8",
             "--no-press-enter",
+            "--no-notify-on-detect",
             "--no-append-space",
             "--inject-delay-microsecs",
             "3000",
@@ -1495,6 +1582,7 @@ mod tests {
                 root_dir: Some(PathBuf::from("/tmp/file-wakewords")),
                 threshold: Some(0.4),
                 press_enter: Some(true),
+                notify_on_detect: Some(true),
                 ..WakewordFileConfig::default()
             },
             dictation: DictationFileConfig {
@@ -1514,6 +1602,7 @@ mod tests {
         assert_eq!(settings.root_dir, PathBuf::from("/tmp/cli-wakewords"));
         assert_eq!(settings.threshold, 0.8);
         assert!(!settings.press_enter);
+        assert!(!resolve_wakeword_notify_on_detect(&args, &file_config));
         assert!(!resolve_wakeword_append_space(&args, &file_config));
         assert_eq!(resolve_wakeword_inject_delay(&args, &file_config), 3_000);
     }

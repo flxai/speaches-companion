@@ -92,6 +92,7 @@ silence_timeout_ms = 5000
 activation_grace_ms = 5000
 max_recording_ms = 30000
 press_enter = true
+notify_on_detect = true
 ```
 
 For compatible existing setups, environment and CLI values still work. The
@@ -190,7 +191,9 @@ Plain Cargo builds keep `--record-dir` unavailable unless compiled with
 
 Wake-word dictation runs separately from the hotkey daemon. The canonical flake
 entrypoint is `.#wakeword`, which already references predownloaded stock
-openWakeWord ONNX assets:
+openWakeWord ONNX assets. The bundled stock heads are `alexa`, `timer`, and
+`weather`; they are useful for validating microphone capture, wake detection,
+recording, STT, and text injection before training a project-specific phrase:
 
 ```sh
 nix run .#wakeword
@@ -210,11 +213,25 @@ predownloaded assets instead of downloading them on demand. The flake also
 exposes `.#openwakeword-assets` for prefetching those stock ONNX files
 explicitly.
 
+Wakeword dictation follows the same `[dictation]` injection policy as hotkey
+dictation. With `realtime_partials = true`, wakeword mode starts realtime
+streaming after the wake phrase and injects inline partials while you speak;
+with `realtime_partials = false`, it records until silence and injects one final
+transcript.
+
+`name` is the local profile directory, while `stock_model` only chooses the
+fallback keyword head to install when `wakeword.root_dir/<name>/model.onnx` is
+missing. Once a custom `model.onnx` exists in that profile directory,
+`stock_model` is ignored. Treat stock heads as bootstrap/smoke-test models; for
+the final assistant wake phrase, train a custom openWakeWord head and keep
+`engine = "openwakeword"` so Companion can reuse the same shared feature
+extractor assets.
+
 For custom openWakeWord heads, the canonical automation path is:
 
 ```sh
 nix run .#train-wakeword -- --help
-nix run .#train-wakeword -- "hey computer"
+nix run .#train-wakeword -- "computer"
 ```
 
 That command uses the pinned upstream openWakeWord training stack, generates
@@ -224,8 +241,8 @@ ONNX artifact, and installs it directly as
 filesystem-safe name or install root explicitly:
 
 ```sh
-nix run .#train-wakeword -- "Hey, Computer!" --name hey_computer
-nix run .#train-wakeword -- "hey computer" --root-dir /tmp/wakewords
+nix run .#train-wakeword -- "computer" --name computer
+nix run .#train-wakeword -- "computer" --root-dir /tmp/wakewords
 ```
 
 The generated training workspace is kept under
@@ -234,6 +251,9 @@ pass `--output-dir`. For a standalone raw-audio model, run with `--engine onnx`;
 for a custom openWakeWord keyword head, keep the default `openwakeword` engine
 and replace only `model.onnx`. Speaches STT is still only used after a wake
 detection, and dictation stops after `silence_timeout_ms` of silence.
+Set `notify_on_detect = true` to show a desktop notification when the wake word
+fires; the built-in default is off so unattended/daemon setups stay quiet unless
+you opt in.
 
 To use the trained model as the chosen wakeword, point your config at the same
 `root_dir` and then run wakeword mode with the derived or chosen profile name:
@@ -252,9 +272,9 @@ speaches-companion wakeword
 nix run .#wakeword
 ```
 
-`nix run .#train-wakeword -- "hey computer"` installs the ONNX head at
-`wakeword.root_dir/hey_computer/model.onnx`, so set `wakeword.name =
-"hey_computer"` if you want the bare `speaches-companion wakeword` command,
+`nix run .#train-wakeword -- "computer"` installs the ONNX head at
+`wakeword.root_dir/computer/model.onnx`, so set `wakeword.name =
+"computer"` if you want the bare `speaches-companion wakeword` command,
 WM binding, wrapper, or service to use it automatically. An explicit CLI name
 still overrides the config:
 
