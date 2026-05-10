@@ -1,5 +1,5 @@
 {
-  description = "Speaches twin for desktop dictation";
+  description = "Speaches Companion: type what you speak and read what you mark";
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
 
@@ -313,7 +313,7 @@ PY
 
       commonArgs = {
         pname = "speaches-companion";
-        version = "0.3.0";
+        version = "0.4.0";
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
         buildFeatures = [
@@ -324,7 +324,7 @@ PY
         ];
 
         meta = with lib; {
-          description = "Speaches twin for Linux desktop dictation";
+          description = "Type what you speak and read what you mark through Speaches";
           mainProgram = "speaches-companion";
           platforms = platforms.linux;
         };

@@ -462,7 +462,9 @@ where
         }
 
         if self.accumulated_samples >= OPENWAKEWORD_FRAME_SAMPLES
-            && self.accumulated_samples % OPENWAKEWORD_FRAME_SAMPLES == 0
+            && self
+                .accumulated_samples
+                .is_multiple_of(OPENWAKEWORD_FRAME_SAMPLES)
         {
             let new_frames = self.accumulated_samples / OPENWAKEWORD_FRAME_SAMPLES;
             self.stream_melspectrogram(self.accumulated_samples)?;
@@ -966,12 +968,12 @@ where
 }
 
 fn notify_wakeword_detected(name: String, score: f32) {
-    let _ = tokio::task::spawn_blocking(move || {
+    std::mem::drop(tokio::task::spawn_blocking(move || {
         let notifier = DesktopWakewordNotifier;
         if let Err(error) = notifier.notify_detected(&name, score) {
             eprintln!("speaches-companion wakeword notification failed: {error:#}");
         }
-    });
+    }));
 }
 
 pub async fn wait_for_wake<S>(
