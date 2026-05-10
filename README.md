@@ -8,15 +8,51 @@ audio, sends it to Speaches for STT, types the transcript into the focused app,
 and reads marked text back through Speaches TTS. It is not a standalone speech
 engine and only works in conjunction with a running Speaches-compatible server.
 
-The product name is Speaches Companion. The binary, flake app, config
-directory, and related identifiers remain `speaches-companion`.
-
 The Nix flake is the primary interface. It builds the `speaches-companion` binary,
 wraps it with the required PipeWire and X11 selection helpers, and exposes the
 daemon, hotkey, read-aloud, smoke-test, injection, and transcription subcommands
 as flake apps.
 
-## Running
+## Usage
+
+### Installation
+
+Install Speaches Companion into your user profile directly from GitHub:
+
+```sh
+nix profile install github:flxai/speaches-companion
+speaches-companion --help
+```
+
+To pin a specific release, install from the tag explicitly:
+
+```sh
+nix profile install github:flxai/speaches-companion/v0.4.1
+```
+
+For declarative NixOS or Home Manager setups, add the flake as an input and
+install its default package:
+
+```nix
+{
+  inputs.speaches-companion.url = "github:flxai/speaches-companion/v0.4.1";
+
+  outputs = { self, nixpkgs, speaches-companion, ... }: {
+    nixosConfigurations.host = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ({ pkgs, ... }: {
+          environment.systemPackages = [
+            speaches-companion.packages.${pkgs.system}.default
+          ];
+        })
+      ];
+    };
+  };
+}
+```
+
+### Quick Start
 
 Run the default CLI from the flake:
 
@@ -26,7 +62,10 @@ nix run .#speaches-companion -- --help
 nix run . -- daemon
 ```
 
-The `.` is required. Without it, `nix run -- daemon` treats `daemon` as the flake to run.
+The `.` is required. Without it, `nix run -- daemon` treats `daemon` as the
+flake to run.
+
+### Flake Apps
 
 Subcommand aliases are also exposed as flake apps:
 
@@ -39,6 +78,8 @@ nix run .#read-aloud -- --text "hello from Speaches"
 nix run .#realtime-check
 nix run .#wakeword
 ```
+
+### Configuration
 
 `speaches-companion` reads configuration from
 `$XDG_CONFIG_HOME/speaches-companion/config.toml`, falling back to
@@ -95,11 +136,12 @@ press_enter = true
 notify_on_detect = true
 ```
 
-For compatible existing setups, environment and CLI values still work. The
-resolution order is CLI flags, then environment variables, then TOML, then
+CLI flags override environment variables, which override TOML, which overrides
 built-in defaults. `SPEACHES_BASE_URL`, `SPEACHES_COMPANION_MODEL`, and
-`SPEACHES_COMPANION_LANGUAGE` configure STT; the legacy `SPEACHES_STT_MODEL` is
-still accepted as a model fallback.
+`SPEACHES_COMPANION_LANGUAGE` configure STT; the legacy `SPEACHES_STT_MODEL`
+is still accepted as a model fallback.
+
+### Read Aloud
 
 Read-aloud uses Speaches' OpenAI-compatible `/v1/audio/speech` endpoint.
 Without `--text`, it reads marked text from the X11 primary selection and falls
@@ -110,6 +152,8 @@ TTS with
 Use `--speed`, `SPEACHES_COMPANION_TTS_SPEED`, or `tts.speed` to adjust speech
 rate. Use repeated `--player-arg` flags or `tts.player_args` when the selected
 response format needs player-specific options, for example raw PCM playback.
+
+### Dictation
 
 By default, the daemon records while the hotkey is held and sends one final
 transcription request to Speaches on release. Set `realtime_partials = true` to
@@ -189,8 +233,10 @@ nix run . -- daemon --record-dir target/speaches-companion-recordings
 Plain Cargo builds keep `--record-dir` unavailable unless compiled with
 `--features debug-recordings`.
 
-Wake-word dictation runs separately from the hotkey daemon. The canonical flake
-entrypoint is `.#wakeword`, which already references predownloaded stock
+### Wakeword
+
+Wakeword dictation runs separately from the hotkey daemon. The flake entrypoint
+is `.#wakeword`, which already references predownloaded stock
 openWakeWord ONNX assets. The bundled stock heads are `alexa`, `timer`, and
 `weather`; they are useful for validating microphone capture, wake detection,
 recording, STT, and text injection before training a project-specific phrase:
@@ -205,10 +251,10 @@ nix run . -- wakeword --assets-dir "$(nix build .#openwakeword-assets --print-ou
 `default`, and stores artifacts under
 `wakeword.root_dir/<name>/`; unset `root_dir` defaults to
 `$XDG_DATA_HOME/speaches-companion/wakewords` or
-`~/.local/share/speaches-companion/wakewords`. The canonical default engine is
+`~/.local/share/speaches-companion/wakewords`. The default engine is
 `openwakeword`: on first run it installs the shared `melspectrogram.onnx` and
 `embedding_model.onnx` assets plus the selected stock keyword head, then runs
-the full wake-word pipeline locally in Rust. Set `assets_dir` to point at
+the full wakeword pipeline locally in Rust. Set `assets_dir` to point at
 predownloaded assets instead of downloading them on demand. The flake also
 exposes `.#openwakeword-assets` for prefetching those stock ONNX files
 explicitly.
@@ -227,7 +273,9 @@ the final assistant wake phrase, train a custom openWakeWord head and keep
 `engine = "openwakeword"` so Companion can reuse the same shared feature
 extractor assets.
 
-For custom openWakeWord heads, the canonical automation path is:
+### Custom Wakeword Training
+
+For custom openWakeWord heads, the recommended automation path is:
 
 ```sh
 nix run .#train-wakeword -- --help
@@ -295,6 +343,8 @@ launcher copies the notebook into a writable local workspace before opening it,
 and patches the demo inference cells to use the ONNX backend so they match this
 repo's runtime expectations.
 
+### Diagnostics
+
 Speaches SSE transcription responses can be tested with:
 
 ```sh
@@ -336,3 +386,8 @@ Run the full CI set locally:
 ```sh
 nix flake check --print-build-logs
 ```
+
+## Naming
+
+Use Speaches Companion in prose. The binary, flake app, config directory, and
+related identifiers remain `speaches-companion`.
