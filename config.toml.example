@@ -1,0 +1,62 @@
+# Speaches Companion example configuration.
+#
+# Copy this file to:
+#   $XDG_CONFIG_HOME/speaches-companion/config.toml
+# or:
+#   ~/.config/speaches-companion/config.toml
+#
+# Leave values commented out to keep the built-in defaults.
+
+[speaches]
+base_url = "http://localhost:8000"
+
+[stt]
+# model = "Systran/faster-whisper-large-v3"
+# language = "de"
+
+[tts]
+# model = "tts-1"
+# voice = "en_US-lessac-medium"
+# speed = 1.0
+# response_format = "wav"
+# player = "pw-play"
+# player_args = []
+
+[dictation]
+# transcript_dir = "target/speaches-companion-transcripts"
+# record_dir = "target/speaches-companion-recordings" # flake/debug-recordings builds
+# stream_response = false
+# realtime_partials = false
+# final_pass = true
+# listening_marker = "💬"
+# inline_partials = true
+# partial_chunking = true
+# partial_chunk_delay_ms = 80
+# partial_chunk_max_delay_ms = 250
+# append_space = true
+# inject_delay_microsecs = 0
+# paste_settle_delay_ms = 450
+# paste_in_terminals = false
+# leading_silence_ms = 250
+# preroll_ms = 750
+
+[wakeword]
+# name = "default"
+# engine = "openwakeword" # or "onnx"
+# stock_model = "alexa" # openwakeword fallback: "alexa", "timer", or "weather"
+# assets_dir = "/path/to/openwakeword-assets"
+# root_dir = "/home/you/.local/share/speaches-companion/wakewords"
+# threshold = 0.5
+# frame_ms = 80
+# silence_timeout_ms = 5000
+# activation_grace_ms = 5000
+# max_recording_ms = 30000
+# press_enter = true
+# notify_on_detect = false
+
+# Notes:
+# - `stock_model` is only used when `root_dir/<name>/model.onnx` does not exist yet.
+# - `notify_on_detect` only affects wakeword mode.
+# - Wakeword mode also reuses relevant [dictation] settings such as
+#   `listening_marker`, `inline_partials`, `partial_chunking`, `append_space`,
+#   `inject_delay_microsecs`, `paste_settle_delay_ms`, and `paste_in_terminals`.

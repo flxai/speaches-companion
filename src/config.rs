@@ -11,7 +11,7 @@ use crate::clock::unix_millis;
 use crate::text::{non_empty_str, non_empty_string};
 use crate::wakeword::{OpenWakewordStockModel, WakewordEngine};
 
-pub const DEFAULT_BASE_URL: &str = "http://ono.tail:8000";
+pub const DEFAULT_BASE_URL: &str = "http://localhost:8000";
 pub const DEFAULT_MODEL: &str = "Systran/faster-whisper-large-v3";
 pub const DEFAULT_TTS_MODEL: &str = "tts-1";
 pub const DEFAULT_TTS_PLAYER: &str = "pw-play";

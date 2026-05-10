@@ -259,6 +259,18 @@ notify_on_detect = true
     assert_eq!(config.wakeword.notify_on_detect, Some(true));
 }
 
+#[test]
+fn example_config_parses() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml.example");
+
+    let config = load_file_config_at(&path).unwrap();
+
+    assert_eq!(
+        config.speaches.base_url.as_deref(),
+        Some("http://localhost:8000")
+    );
+}
+
 #[cfg(feature = "debug-recordings")]
 #[test]
 fn loads_record_dir_from_toml_file_config() {
@@ -331,7 +343,7 @@ fn config_path_prefers_cli_then_environment() {
 #[test]
 fn realtime_url_converts_http_endpoint_to_ws_endpoint() {
     let url = realtime_ws_url(
-        "http://ono.tail:8000",
+        "http://localhost:8000",
         "Systran/faster-whisper-large-v3",
         None,
     )
@@ -339,7 +351,7 @@ fn realtime_url_converts_http_endpoint_to_ws_endpoint() {
 
     assert_eq!(
         url,
-        "ws://ono.tail:8000/v1/realtime?intent=transcription&model=Systran%2Ffaster-whisper-large-v3"
+        "ws://localhost:8000/v1/realtime?intent=transcription&model=Systran%2Ffaster-whisper-large-v3"
     );
 }
 

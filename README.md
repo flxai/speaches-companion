@@ -88,9 +88,13 @@ nix run .#wakeword
 `SPEACHES_COMPANION_CONFIG`, to point at another file. Missing config files are
 treated as empty.
 
+See [config.toml.example](config.toml.example) for a complete annotated example.
+Copy it to one of the paths above and uncomment only the values you want to
+override.
+
 ```toml
 [speaches]
-base_url = "http://ono.tail:8000"
+base_url = "http://localhost:8000"
 
 [stt]
 model = "Systran/faster-whisper-large-v3"
