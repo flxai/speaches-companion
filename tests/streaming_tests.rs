@@ -153,7 +153,7 @@ async fn streaming_empty_live_update_does_not_erase_marker_or_text() {
         *operations.lock().unwrap(),
         vec![
             InjectOperation::Type("💬".to_string()),
-            InjectOperation::Backspace(1),
+            InjectOperation::CursorLeft(1),
             InjectOperation::Type("the front".to_string()),
             InjectOperation::Type(" fell".to_string()),
         ]
@@ -161,7 +161,7 @@ async fn streaming_empty_live_update_does_not_erase_marker_or_text() {
 }
 
 #[tokio::test]
-async fn streaming_marker_is_replaced_by_live_partial_before_hotkey_up() {
+async fn streaming_marker_tracks_live_partial_before_hotkey_up() {
     let transcriber = ManualLiveTranscriber::new("hello window");
     let updates = transcriber.updates.clone();
     let injector = FakeInjector::default();
@@ -181,7 +181,10 @@ async fn streaming_marker_is_replaced_by_live_partial_before_hotkey_up() {
         .unwrap();
     assert_eq!(
         *operations.lock().unwrap(),
-        vec![InjectOperation::Type("💬".to_string())]
+        vec![
+            InjectOperation::Type("💬".to_string()),
+            InjectOperation::CursorLeft(1),
+        ]
     );
 
     updates.send("hello").await;
@@ -191,14 +194,14 @@ async fn streaming_marker_is_replaced_by_live_partial_before_hotkey_up() {
         *operations.lock().unwrap(),
         vec![
             InjectOperation::Type("💬".to_string()),
-            InjectOperation::Backspace(1),
+            InjectOperation::CursorLeft(1),
             InjectOperation::Type("hello".to_string()),
         ]
     );
 }
 
 #[tokio::test]
-async fn streaming_marker_is_replaced_by_partial_and_final_text() {
+async fn streaming_marker_is_removed_before_partial_and_final_text_commit() {
     let transcriber = ManualLiveTranscriber::new("  hello window\n");
     let updates = transcriber.updates.clone();
     let injector = FakeInjector::default();
@@ -227,11 +230,11 @@ async fn streaming_marker_is_replaced_by_partial_and_final_text() {
         *operations.lock().unwrap(),
         vec![
             InjectOperation::Type("💬".to_string()),
-            InjectOperation::Backspace(1),
+            InjectOperation::CursorLeft(1),
             InjectOperation::Type("hello".to_string()),
-            InjectOperation::Type(" 💬".to_string()),
+            InjectOperation::CursorRight(1),
             InjectOperation::Backspace(1),
-            InjectOperation::Type("window ".to_string()),
+            InjectOperation::Type(" window ".to_string()),
         ]
     );
 }
@@ -265,15 +268,14 @@ async fn streaming_shows_wait_marker_while_final_transcript_is_pending() {
             .unwrap();
     });
     stop_started.notified().await;
-    wait_for_operations_len(&operations, 4).await;
+    wait_for_operations_len(&operations, 3).await;
 
     assert_eq!(
         *operations.lock().unwrap(),
         vec![
             InjectOperation::Type("💬".to_string()),
-            InjectOperation::Backspace(1),
+            InjectOperation::CursorLeft(1),
             InjectOperation::Type("hello".to_string()),
-            InjectOperation::Type(" 💬".to_string()),
         ]
     );
 
@@ -284,11 +286,11 @@ async fn streaming_shows_wait_marker_while_final_transcript_is_pending() {
         *operations.lock().unwrap(),
         vec![
             InjectOperation::Type("💬".to_string()),
-            InjectOperation::Backspace(1),
+            InjectOperation::CursorLeft(1),
             InjectOperation::Type("hello".to_string()),
-            InjectOperation::Type(" 💬".to_string()),
+            InjectOperation::CursorRight(1),
             InjectOperation::Backspace(1),
-            InjectOperation::Type("window ".to_string()),
+            InjectOperation::Type(" window ".to_string()),
         ]
     );
 }
@@ -319,6 +321,8 @@ async fn streaming_marker_is_erased_when_no_transcript_arrives() {
         *operations.lock().unwrap(),
         vec![
             InjectOperation::Type("💬".to_string()),
+            InjectOperation::CursorLeft(1),
+            InjectOperation::CursorRight(1),
             InjectOperation::Backspace(1),
         ]
     );
@@ -385,8 +389,10 @@ async fn streaming_can_skip_final_pass_and_keep_last_partial() {
         *operations.lock().unwrap(),
         vec![
             InjectOperation::Type("💬".to_string()),
-            InjectOperation::Backspace(1),
+            InjectOperation::CursorLeft(1),
             InjectOperation::Type("hello".to_string()),
+            InjectOperation::CursorRight(1),
+            InjectOperation::Backspace(1),
             InjectOperation::Type(" ".to_string()),
         ]
     );
@@ -508,6 +514,8 @@ async fn streaming_stop_error_cleans_up_marker_when_no_partial_exists() {
         *operations.lock().unwrap(),
         vec![
             InjectOperation::Type("💬".to_string()),
+            InjectOperation::CursorLeft(1),
+            InjectOperation::CursorRight(1),
             InjectOperation::Backspace(1),
         ]
     );
@@ -1033,6 +1041,8 @@ impl LiveTranscriber for FakeLiveTranscriber {
 enum InjectOperation {
     Type(String),
     Backspace(usize),
+    CursorLeft(usize),
+    CursorRight(usize),
 }
 
 #[derive(Clone)]
@@ -1067,6 +1077,26 @@ impl TextInjector for FakeInjector {
                 .lock()
                 .unwrap()
                 .push(InjectOperation::Backspace(count));
+        }
+        Ok(())
+    }
+
+    fn move_cursor_left(&self, count: usize) -> anyhow::Result<()> {
+        if count > 0 {
+            self.operations
+                .lock()
+                .unwrap()
+                .push(InjectOperation::CursorLeft(count));
+        }
+        Ok(())
+    }
+
+    fn move_cursor_right(&self, count: usize) -> anyhow::Result<()> {
+        if count > 0 {
+            self.operations
+                .lock()
+                .unwrap()
+                .push(InjectOperation::CursorRight(count));
         }
         Ok(())
     }

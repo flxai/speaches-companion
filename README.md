@@ -201,8 +201,10 @@ Final dictation text gets one trailing space by default, so the next typed word
 starts naturally after the injected transcript. Use `append_space = false` or
 `--no-append-space` to keep the transcript exact after trimming.
 
-The daemon inserts `💬` after audio capture starts, then replaces it with the
-first partial or final text. Override or disable it with:
+The daemon inserts `💬` after audio capture starts, moves the cursor left, and
+keeps it as a trailing live marker while dictation is active. It removes the
+marker again when the final or fallback text is committed. Override or disable
+it with:
 
 ```sh
 nix run . -- daemon --listening-marker "..."

@@ -52,6 +52,22 @@ pub trait TextInjector: Send + Sync {
         self.replace_tail(erase_count, text_suffix)
     }
 
+    fn move_cursor_left(&self, count: usize) -> anyhow::Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+
+        bail!("text injector does not support moving cursor left by {count} characters")
+    }
+
+    fn move_cursor_right(&self, count: usize) -> anyhow::Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+
+        bail!("text injector does not support moving cursor right by {count} characters")
+    }
+
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
         Ok(None)
     }
@@ -161,6 +177,20 @@ impl TextInjector for DesktopTextBackend {
         }
     }
 
+    fn move_cursor_left(&self, count: usize) -> anyhow::Result<()> {
+        match self {
+            Self::Sway(injector) => injector.move_cursor_left(count),
+            Self::X11(injector) => injector.move_cursor_left(count),
+        }
+    }
+
+    fn move_cursor_right(&self, count: usize) -> anyhow::Result<()> {
+        match self {
+            Self::Sway(injector) => injector.move_cursor_right(count),
+            Self::X11(injector) => injector.move_cursor_right(count),
+        }
+    }
+
     fn session_insert_mode(&self) -> anyhow::Result<SessionInsertMode> {
         match self {
             Self::Sway(injector) => injector.session_insert_mode(),
@@ -198,6 +228,14 @@ impl TextInjector for DesktopTextInjector {
 
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
         self.backend().focused_window()
+    }
+
+    fn move_cursor_left(&self, count: usize) -> anyhow::Result<()> {
+        self.backend().move_cursor_left(count)
+    }
+
+    fn move_cursor_right(&self, count: usize) -> anyhow::Result<()> {
+        self.backend().move_cursor_right(count)
     }
 
     fn session_insert_mode(&self) -> anyhow::Result<SessionInsertMode> {
@@ -255,6 +293,36 @@ impl TextInjector for LibXdoTextInjector {
         let xdo = RawXdo::new()?;
         xdo.with_cleared_modifiers(|| xdo.send_keysequence("Return", self.delay_microsecs))
             .context("libxdo enter key injection failed")
+    }
+
+    fn move_cursor_left(&self, count: usize) -> anyhow::Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+
+        let xdo = RawXdo::new()?;
+        xdo.with_cleared_modifiers(|| {
+            for _ in 0..count {
+                xdo.send_keysequence("Left", self.delay_microsecs)?;
+            }
+            Ok(())
+        })
+        .context("libxdo cursor-left injection failed")
+    }
+
+    fn move_cursor_right(&self, count: usize) -> anyhow::Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+
+        let xdo = RawXdo::new()?;
+        xdo.with_cleared_modifiers(|| {
+            for _ in 0..count {
+                xdo.send_keysequence("Right", self.delay_microsecs)?;
+            }
+            Ok(())
+        })
+        .context("libxdo cursor-right injection failed")
     }
 
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
@@ -652,6 +720,16 @@ impl TextInjector for SwayTextInjector {
             .context("sway text replacement failed")
     }
 
+    fn move_cursor_left(&self, count: usize) -> anyhow::Result<()> {
+        self.run_wtype_keys("Left", count)
+            .context("sway/wtype cursor-left injection failed")
+    }
+
+    fn move_cursor_right(&self, count: usize) -> anyhow::Result<()> {
+        self.run_wtype_keys("Right", count)
+            .context("sway/wtype cursor-right injection failed")
+    }
+
     fn focused_window(&self) -> anyhow::Result<Option<FocusedWindow>> {
         let tree = self.sway_tree()?;
         let focused_id = focused_sway_node_id(&tree).context("failed to find focused Sway node")?;
@@ -979,6 +1057,7 @@ where
     target_window: Option<FocusedWindow>,
     session_insert_mode: SessionInsertMode,
     inserted_text: String,
+    trailing_marker: Option<String>,
     aborted: bool,
 }
 
@@ -994,6 +1073,7 @@ where
             target_window,
             session_insert_mode,
             inserted_text: String::new(),
+            trailing_marker: None,
             aborted: false,
         })
     }
@@ -1015,6 +1095,37 @@ where
 
     pub fn inserted_text(&self) -> &str {
         &self.inserted_text
+    }
+
+    pub fn show_trailing_marker(&mut self, marker: &str) -> anyhow::Result<bool> {
+        if marker.is_empty() {
+            return Ok(false);
+        }
+        self.ensure_target_is_still_focused()?;
+
+        if self.trailing_marker.as_deref() == Some(marker) {
+            return Ok(false);
+        }
+        if self.trailing_marker.is_some() {
+            self.hide_trailing_marker()?;
+        }
+
+        self.injector.inject_text(marker)?;
+        self.injector.move_cursor_left(marker.chars().count())?;
+        self.trailing_marker = Some(marker.to_string());
+        Ok(true)
+    }
+
+    pub fn hide_trailing_marker(&mut self) -> anyhow::Result<bool> {
+        let Some(count) = self.trailing_marker.as_ref().map(|marker| marker.chars().count()) else {
+            return Ok(false);
+        };
+        self.ensure_target_is_still_focused()?;
+
+        self.injector.move_cursor_right(count)?;
+        self.injector.erase_chars(count)?;
+        self.trailing_marker = None;
+        Ok(true)
     }
 
     pub fn abort(&mut self) {
@@ -1171,6 +1282,29 @@ mod tests {
             *replacements.lock().unwrap(),
             vec![(0, "💬".to_string()), (1, "hello".to_string())]
         );
+    }
+
+    #[test]
+    fn trailing_marker_stays_outside_speculative_replacement_buffer() {
+        let injector = FakeInjector::default();
+        let operations = injector.operations.clone();
+        let mut session = SpeculativeTextSession::start(injector).unwrap();
+
+        session.show_trailing_marker("💬").unwrap();
+        session.replace_text("hello").unwrap();
+        session.hide_trailing_marker().unwrap();
+
+        assert_eq!(
+            *operations.lock().unwrap(),
+            vec![
+                InjectOperation::Type("💬".to_string()),
+                InjectOperation::CursorLeft(1),
+                InjectOperation::Type("hello".to_string()),
+                InjectOperation::CursorRight(1),
+                InjectOperation::Backspace(1),
+            ]
+        );
+        assert_eq!(session.inserted_text(), "hello");
     }
 
     #[test]
@@ -1396,6 +1530,8 @@ mod tests {
     enum InjectOperation {
         Type(String),
         Backspace(usize),
+        CursorLeft(usize),
+        CursorRight(usize),
     }
 
     #[derive(Clone, Default)]
@@ -1420,6 +1556,26 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push(InjectOperation::Backspace(count));
+            }
+            Ok(())
+        }
+
+        fn move_cursor_left(&self, count: usize) -> anyhow::Result<()> {
+            if count > 0 {
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(InjectOperation::CursorLeft(count));
+            }
+            Ok(())
+        }
+
+        fn move_cursor_right(&self, count: usize) -> anyhow::Result<()> {
+            if count > 0 {
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(InjectOperation::CursorRight(count));
             }
             Ok(())
         }

@@ -110,8 +110,7 @@ where
 }
 
 enum PartialTextCommand {
-    ShowWaitingMarker {
-        marker: Option<String>,
+    FlushPending {
         ack: oneshot::Sender<anyhow::Result<()>>,
     },
 }
@@ -121,21 +120,17 @@ struct PartialDisplayState {
     latest_partial: Option<String>,
     displayed_partial: Option<String>,
     last_announced_partial: Option<String>,
-    waiting_marker: Option<String>,
-    last_displayed_text: String,
     dirty_started_at: Option<Instant>,
     last_update_at: Option<Instant>,
     last_flush_at: Option<Instant>,
 }
 
 impl PartialDisplayState {
-    fn new(initial_display_text: String) -> Self {
+    fn new() -> Self {
         Self {
             latest_partial: None,
             displayed_partial: None,
             last_announced_partial: None,
-            waiting_marker: None,
-            last_displayed_text: initial_display_text,
             dirty_started_at: None,
             last_update_at: None,
             last_flush_at: None,
@@ -192,19 +187,8 @@ impl PartialDisplayState {
         I: TextInjector,
         V: TranscriptNotifier,
     {
-        let display_text = displayed_partial_text(
-            self.latest_partial.as_deref(),
-            self.waiting_marker.as_deref(),
-        );
-        if display_text == self.last_displayed_text {
-            self.displayed_partial = self.latest_partial.clone();
-            self.dirty_started_at = None;
-            self.last_update_at = None;
-            return Ok(());
-        }
-
-        text_session.replace_text(&display_text)?;
-        self.last_displayed_text = display_text;
+        let display_text = self.latest_partial.as_deref().unwrap_or("");
+        text_session.replace_text(display_text)?;
         self.displayed_partial = self.latest_partial.clone();
         self.dirty_started_at = None;
         self.last_update_at = None;
@@ -215,24 +199,6 @@ impl PartialDisplayState {
         }
 
         Ok(())
-    }
-
-    fn show_waiting_marker<I, V>(
-        &mut self,
-        marker: Option<String>,
-        text_session: &mut SpeculativeTextSession<I>,
-        transcript_notifier: &V,
-        now: Instant,
-    ) -> anyhow::Result<()>
-    where
-        I: TextInjector,
-        V: TranscriptNotifier,
-    {
-        if self.has_pending_partial() {
-            self.flush_display(text_session, transcript_notifier, now)?;
-        }
-        self.waiting_marker = marker;
-        self.flush_display(text_session, transcript_notifier, now)
     }
 }
 
@@ -359,7 +325,7 @@ where
             }
         };
         if let Some(marker) = self.listening_marker.as_deref() {
-            if let Err(error) = text_session.replace_text(marker) {
+            if let Err(error) = text_session.show_trailing_marker(marker) {
                 let _ = self.transcriber.stop(live_session.session).await;
                 self.notify_failure("Listening marker injection failed", &error);
                 return Err(error);
@@ -396,11 +362,9 @@ where
             partial_task,
         } = active;
 
-        if self.final_transcript {
-            if let Err(error) =
-                show_waiting_marker(&partial_command_tx, self.listening_marker.clone()).await
-            {
-                self.notify_failure("Final wait marker replacement failed", &error);
+        if let Err(error) = flush_pending_partial(&partial_command_tx).await {
+            if self.final_transcript {
+                self.notify_failure("Pending partial flush failed", &error);
             }
         }
 
@@ -415,6 +379,9 @@ where
                         return Err(partial_error);
                     }
                 };
+                if let Err(cleanup_error) = partial_state.text_session.hide_trailing_marker() {
+                    self.notify_failure("Listening marker cleanup failed", &cleanup_error);
+                }
                 if let Some(partial) = partial_state.latest_partial.as_deref() {
                     if let Some(text) = format_transcript_for_injection(partial, self.append_space)
                     {
@@ -442,6 +409,10 @@ where
                 return Err(error);
             }
         };
+        if let Err(error) = partial_state.text_session.hide_trailing_marker() {
+            self.notify_failure("Listening marker cleanup failed", &error);
+            return Err(error);
+        }
 
         let final_transcript = if self.final_transcript {
             normalize_transcript_for_injection(&stop_transcript)
@@ -503,7 +474,7 @@ where
     V: TranscriptNotifier,
     N: ErrorNotifier,
 {
-    let mut display_state = PartialDisplayState::new(text_session.inserted_text().to_string());
+    let mut display_state = PartialDisplayState::new();
     let mut updates_open = true;
     let mut commands_open = true;
     let mut flush_timer = Box::pin(tokio::time::sleep_until(
@@ -528,14 +499,12 @@ where
                 if !display_state.update_latest_partial(transcript.clone()) {
                     continue;
                 }
-                if !inline_partials && display_state.waiting_marker.is_none() {
+                if !inline_partials {
                     display_state.announce_partial(&transcript_notifier, &transcript);
                     continue;
                 }
 
-                let should_flush_now = display_state.waiting_marker.is_some()
-                    || !partial_chunking.enabled
-                    || ends_at_boundary;
+                let should_flush_now = !partial_chunking.enabled || ends_at_boundary;
                 if should_flush_now {
                     if let Err(error) = display_state.flush_display(
                         &mut text_session,
@@ -565,15 +534,16 @@ where
                     continue;
                 };
                 match command {
-                    PartialTextCommand::ShowWaitingMarker { marker, ack } => {
-                        let marker =
-                            marker.and_then(|marker| normalize_transcript_for_injection(&marker));
-                        let result = display_state.show_waiting_marker(
-                            marker,
-                            &mut text_session,
-                            &transcript_notifier,
-                            Instant::now(),
-                        );
+                    PartialTextCommand::FlushPending { ack } => {
+                        let result = if display_state.has_pending_partial() {
+                            display_state.flush_display(
+                                &mut text_session,
+                                &transcript_notifier,
+                                Instant::now(),
+                            )
+                        } else {
+                            Ok(())
+                        };
                         let _ = ack.send(result);
                     }
                 }
@@ -593,43 +563,17 @@ where
     }
 }
 
-async fn show_waiting_marker(
+async fn flush_pending_partial(
     command_tx: &mpsc::Sender<PartialTextCommand>,
-    marker: Option<String>,
 ) -> anyhow::Result<()> {
-    let Some(marker) = marker.and_then(|marker| normalize_transcript_for_injection(&marker)) else {
-        return Ok(());
-    };
     let (ack_tx, ack_rx) = oneshot::channel();
     command_tx
-        .send(PartialTextCommand::ShowWaitingMarker {
-            marker: Some(marker),
-            ack: ack_tx,
-        })
+        .send(PartialTextCommand::FlushPending { ack: ack_tx })
         .await
-        .context("partial text task stopped before final wait marker could be shown")?;
+        .context("partial text task stopped before pending partial could be flushed")?;
     ack_rx
         .await
-        .context("partial text task stopped before acknowledging final wait marker")?
-}
-
-fn displayed_partial_text(partial: Option<&str>, waiting_marker: Option<&str>) -> String {
-    match (partial, waiting_marker) {
-        (Some(partial), Some(marker)) => append_marker(partial, marker),
-        (Some(partial), None) => partial.to_string(),
-        (None, Some(marker)) => marker.to_string(),
-        (None, None) => String::new(),
-    }
-}
-
-fn append_marker(text: &str, marker: &str) -> String {
-    if text.is_empty() {
-        marker.to_string()
-    } else if text.ends_with(char::is_whitespace) || marker.starts_with(char::is_whitespace) {
-        format!("{text}{marker}")
-    } else {
-        format!("{text} {marker}")
-    }
+        .context("partial text task stopped before acknowledging pending partial flush")?
 }
 
 fn ends_at_stable_boundary(transcript: &str) -> bool {
