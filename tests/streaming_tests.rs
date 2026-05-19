@@ -359,6 +359,121 @@ async fn streaming_uses_last_partial_when_final_is_empty() {
 }
 
 #[tokio::test]
+async fn streaming_keeps_long_partial_when_final_is_suffix() {
+    let live_partial = "this is a longer live partial that already contains the beginning and the rest of the message";
+    let transcriber =
+        FakeLiveTranscriber::new([live_partial], Ok("the rest of the message".to_string()));
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let transcript_notifier = FakeTranscriptNotifier::default();
+    let transcript_events = transcript_notifier.events.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        transcript_notifier,
+        FakeErrorNotifier::default(),
+    );
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    controller
+        .handle_hotkey(IpcCommand::HotkeyUp)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            InjectOperation::Type(live_partial.to_string()),
+            InjectOperation::Type(" ".to_string()),
+        ]
+    );
+    assert_eq!(
+        *transcript_events.lock().unwrap(),
+        vec![
+            TranscriptNotice::Listening,
+            TranscriptNotice::Partial(live_partial.to_string()),
+            TranscriptNotice::Final(live_partial.to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn streaming_keeps_long_partial_when_final_is_much_shorter() {
+    let live_partial =
+        "this is a long live partial with enough words to make a short final result suspicious";
+    let transcriber =
+        FakeLiveTranscriber::new([live_partial], Ok("short final result".to_string()));
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        FakeTranscriptNotifier::default(),
+        FakeErrorNotifier::default(),
+    );
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    controller
+        .handle_hotkey(IpcCommand::HotkeyUp)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            InjectOperation::Type(live_partial.to_string()),
+            InjectOperation::Type(" ".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn streaming_allows_shorter_plausible_final() {
+    let transcriber = FakeLiveTranscriber::new(["hello world now"], Ok("hello world".to_string()));
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let transcript_notifier = FakeTranscriptNotifier::default();
+    let transcript_events = transcript_notifier.events.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        transcript_notifier,
+        FakeErrorNotifier::default(),
+    );
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    controller
+        .handle_hotkey(IpcCommand::HotkeyUp)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            InjectOperation::Type("hello world now".to_string()),
+            InjectOperation::Backspace(3),
+        ]
+    );
+    assert_eq!(
+        *transcript_events.lock().unwrap(),
+        vec![
+            TranscriptNotice::Listening,
+            TranscriptNotice::Partial("hello world now".to_string()),
+            TranscriptNotice::Final("hello world".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn streaming_can_skip_final_pass_and_keep_last_partial() {
     let transcriber = FakeLiveTranscriber::new(["hello"], Ok("hello window".to_string()));
     let stops = transcriber.stops.clone();

@@ -422,6 +422,8 @@ where
 
         match final_transcript {
             Some(transcript) => {
+                let transcript =
+                    choose_final_transcript(transcript, partial_state.latest_partial.as_deref());
                 let text = format_transcript_for_injection(&transcript, self.append_space)
                     .expect("normalized transcript should format for injection");
                 if let Err(error) = partial_state.text_session.replace_text(&text) {
@@ -644,6 +646,97 @@ where
     if let Err(notify_error) = notifier.notify_error(DICTATION_ERROR_SUMMARY, &body) {
         eprintln!("speaches-companion notification failed: {notify_error:#}");
     }
+}
+
+fn choose_final_transcript(final_transcript: String, latest_partial: Option<&str>) -> String {
+    let Some(partial) = latest_partial.and_then(normalize_transcript_for_injection) else {
+        return final_transcript;
+    };
+
+    if final_transcript == partial {
+        return final_transcript;
+    }
+
+    if final_transcript.chars().count() >= partial.chars().count() {
+        return final_transcript;
+    }
+
+    if final_transcript_looks_truncated(&final_transcript, &partial) {
+        log_final_transcript_decision(
+            "partial",
+            &final_transcript,
+            Some(&partial),
+            "final looks truncated",
+        );
+        return partial;
+    }
+
+    log_final_transcript_decision(
+        "final",
+        &final_transcript,
+        Some(&partial),
+        "shorter but plausible",
+    );
+    final_transcript
+}
+
+fn final_transcript_looks_truncated(final_transcript: &str, partial: &str) -> bool {
+    let final_words = word_count(final_transcript);
+    let partial_words = word_count(partial);
+    if partial_words < 8 || final_words >= partial_words {
+        return false;
+    }
+
+    let final_lower = final_transcript.to_lowercase();
+    let partial_lower = partial.to_lowercase();
+    if partial_lower.ends_with(final_lower.trim()) {
+        return true;
+    }
+
+    partial_words >= 12 && final_words.saturating_mul(10) < partial_words.saturating_mul(7)
+}
+
+fn word_count(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
+fn log_final_transcript_decision(
+    choice: &str,
+    final_transcript: &str,
+    latest_partial: Option<&str>,
+    reason: &str,
+) {
+    let final_chars = final_transcript.chars().count();
+    let final_words = word_count(final_transcript);
+    let (partial_chars, partial_words, partial_preview) = latest_partial
+        .map(|partial| {
+            (
+                partial.chars().count(),
+                word_count(partial),
+                transcript_preview(partial),
+            )
+        })
+        .unwrap_or((0, 0, String::new()));
+    eprintln!(
+        "speaches-companion final transcript decision: choice={choice} reason={reason}; final={final_chars} chars/{final_words} words \"{}\"; partial={partial_chars} chars/{partial_words} words \"{}\"",
+        transcript_preview(final_transcript),
+        partial_preview
+    );
+}
+
+fn transcript_preview(text: &str) -> String {
+    const PREVIEW_CHARS: usize = 96;
+    let mut preview = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(PREVIEW_CHARS)
+        .collect::<String>();
+    if text.chars().count() > PREVIEW_CHARS {
+        preview.push_str("...");
+    }
+    preview
 }
 
 #[derive(Clone)]
