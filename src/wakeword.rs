@@ -36,6 +36,8 @@ pub const DEFAULT_WAKEWORD_PRESS_ENTER: bool = true;
 pub const DEFAULT_OPENWAKEWORD_STOCK_MODEL: OpenWakewordStockModel = OpenWakewordStockModel::Alexa;
 
 const DEFAULT_WAKEWORD_IDLE_RETAIN_MS: u64 = 5_000;
+const DEFAULT_WAKEWORD_REARM_QUIET_MS: u64 = 750;
+const DEFAULT_WAKEWORD_REARM_MAX_WAIT_MS: u64 = 3_000;
 const OPENWAKEWORD_CACHE_DIR: &str = "_openwakeword";
 const OPENWAKEWORD_RELEASE_VERSION: &str = "v0.5.1";
 const OPENWAKEWORD_RELEASE_BASE_URL: &str =
@@ -145,6 +147,8 @@ struct WakewordMetadata {
 
 pub trait WakeScorer {
     fn score(&mut self, pcm: &[i16]) -> anyhow::Result<f32>;
+
+    fn reset(&mut self) {}
 }
 
 pub struct WakeDetector<S> {
@@ -183,6 +187,11 @@ where
 
     pub fn scorer_mut(&mut self) -> &mut S {
         &mut self.scorer
+    }
+
+    pub fn reset(&mut self) {
+        self.pending.clear();
+        self.scorer.reset();
     }
 }
 
@@ -507,6 +516,18 @@ impl<B> WakeScorer for OpenWakewordPipelineScorer<B>
 where
     B: OpenWakewordBackend,
 {
+    fn reset(&mut self) {
+        self.raw_data_buffer.clear();
+        self.raw_data_remainder.clear();
+        self.accumulated_samples = 0;
+        self.melspectrogram_buffer =
+            vec![1.0; OPENWAKEWORD_MEL_WINDOW_FRAMES * OPENWAKEWORD_MEL_BINS];
+        self.feature_buffer =
+            vec![0.0; OPENWAKEWORD_FEATURE_MAX_FRAMES * OPENWAKEWORD_EMBEDDING_DIM];
+        self.warmup_windows_remaining = OPENWAKEWORD_WARMUP_WINDOWS;
+        self.last_score = 0.0;
+    }
+
     fn score(&mut self, pcm: &[i16]) -> anyhow::Result<f32> {
         let new_frames = self.stream_features(pcm)?;
         if new_frames == 0 {
@@ -880,18 +901,35 @@ where
             notify_wakeword_detected(config.settings.name.clone(), detection.score);
         }
         if let Some(streaming) = config.streaming.as_ref() {
-            run_streaming_wake_recording(
+            let result = run_streaming_wake_recording(
                 &shared_pcm,
                 &config,
                 streaming.clone(),
                 injector.clone(),
                 &activity,
             )
-            .await?;
+            .await;
+            result?;
+            rearm_wake_detection(&shared_pcm, detector, &config.settings).await;
             continue;
         }
-        run_final_wake_recording(&shared_pcm, &config, injector.clone(), &activity).await?;
+        let result =
+            run_final_wake_recording(&shared_pcm, &config, injector.clone(), &activity).await;
+        result?;
+        rearm_wake_detection(&shared_pcm, detector, &config.settings).await;
     }
+}
+
+async fn rearm_wake_detection<S>(
+    shared_pcm: &SharedPcmBuffer,
+    detector: &mut WakeDetector<S>,
+    settings: &WakewordSettings,
+) where
+    S: WakeScorer,
+{
+    detector.reset();
+    wait_for_rearm_quiet(shared_pcm, settings).await;
+    detector.reset();
 }
 
 async fn run_streaming_wake_recording<I>(
@@ -1101,6 +1139,34 @@ async fn wait_for_recording_silence(
     Ok(tracker.saw_speech())
 }
 
+async fn wait_for_rearm_quiet(shared_pcm: &SharedPcmBuffer, settings: &WakewordSettings) {
+    let quiet_required = Duration::from_millis(DEFAULT_WAKEWORD_REARM_QUIET_MS);
+    let max_wait = Duration::from_millis(DEFAULT_WAKEWORD_REARM_MAX_WAIT_MS);
+    let speech_detector = SpeechActivityDetector::new(STT_SAMPLE_RATE);
+    let mut cursor = snapshot_streaming_pcm(shared_pcm).await.bytes_seen;
+    let started = Instant::now();
+    let mut quiet_since = started;
+
+    loop {
+        sleep(wakeword_poll_interval(settings)).await;
+        let snapshot = snapshot_streaming_pcm(shared_pcm).await;
+        let buffer_start = snapshot.bytes_seen.saturating_sub(snapshot.pcm.len());
+        let start = cursor.saturating_sub(buffer_start).min(snapshot.pcm.len());
+        let new_pcm = &snapshot.pcm[start..];
+        cursor = snapshot.bytes_seen;
+
+        let now = Instant::now();
+        if speech_detector.has_speech(new_pcm) {
+            quiet_since = now;
+        }
+        if now.duration_since(quiet_since) >= quiet_required
+            || now.duration_since(started) >= max_wait
+        {
+            break;
+        }
+    }
+}
+
 async fn transcribe_wake_recording(
     config: &WakewordRunConfig,
     pcm: &[u8],
@@ -1206,6 +1272,23 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
+    struct ResetAwareScorer {
+        score_calls: usize,
+        reset_calls: usize,
+    }
+
+    impl WakeScorer for ResetAwareScorer {
+        fn score(&mut self, _pcm: &[i16]) -> anyhow::Result<f32> {
+            self.score_calls += 1;
+            Ok(1.0)
+        }
+
+        fn reset(&mut self) {
+            self.reset_calls += 1;
+        }
+    }
+
+    #[derive(Debug, Default)]
     struct FakeOpenWakewordBackend {
         keyword_frames: usize,
         melspectrogram_calls: Vec<usize>,
@@ -1261,6 +1344,70 @@ mod tests {
             detector.observe_pcm(&[0; 64]).unwrap(),
             Some(WakeDetection { score: 0.8 })
         );
+    }
+
+    #[test]
+    fn wake_detector_reset_clears_pending_audio_and_scorer_state() {
+        let mut detector =
+            WakeDetector::new(ResetAwareScorer::default(), 0.5, Duration::from_millis(1));
+
+        assert_eq!(detector.observe_pcm(&[0; 30]).unwrap(), None);
+        detector.reset();
+
+        assert_eq!(detector.scorer_mut().reset_calls, 1);
+        assert_eq!(detector.observe_pcm(&[0; 2]).unwrap(), None);
+        assert_eq!(detector.scorer_mut().score_calls, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn wake_detection_rearm_waits_for_quiet_audio() {
+        let shared_pcm = new_test_shared_pcm_buffer(STT_SAMPLE_RATE, Duration::from_secs(5));
+        let rearm_pcm = shared_pcm.clone();
+        let settings = WakewordSettings {
+            name: "default".to_string(),
+            engine: WakewordEngine::Openwakeword,
+            stock_model: DEFAULT_OPENWAKEWORD_STOCK_MODEL,
+            assets_dir: None,
+            root_dir: PathBuf::from("/tmp/wakewords"),
+            threshold: DEFAULT_WAKEWORD_THRESHOLD,
+            frame: Duration::from_millis(20),
+            silence_timeout: Duration::from_millis(DEFAULT_WAKEWORD_SILENCE_TIMEOUT_MS),
+            activation_grace: Duration::from_millis(DEFAULT_WAKEWORD_ACTIVATION_GRACE_MS),
+            max_recording: Duration::from_millis(DEFAULT_WAKEWORD_MAX_RECORDING_MS),
+            press_enter: DEFAULT_WAKEWORD_PRESS_ENTER,
+        };
+        let rearm_settings = settings.clone();
+
+        let rearm = tokio::spawn(async move {
+            let mut detector =
+                WakeDetector::new(ResetAwareScorer::default(), 0.5, Duration::from_millis(1));
+            assert_eq!(detector.observe_pcm(&[0; 30]).unwrap(), None);
+            rearm_wake_detection(&rearm_pcm, &mut detector, &rearm_settings).await;
+            detector
+        });
+        tokio::task::yield_now().await;
+
+        for _ in 0..3 {
+            append_test_streaming_pcm(
+                &shared_pcm,
+                &pcm_for_duration(STT_SAMPLE_RATE, Duration::from_millis(20), 3_000),
+            )
+            .await;
+            advance(Duration::from_millis(20)).await;
+            tokio::task::yield_now().await;
+            assert!(!rearm.is_finished());
+        }
+
+        advance(Duration::from_millis(DEFAULT_WAKEWORD_REARM_QUIET_MS - 100)).await;
+        tokio::task::yield_now().await;
+        assert!(!rearm.is_finished());
+
+        advance(Duration::from_millis(200)).await;
+        let mut detector = rearm.await.unwrap();
+
+        assert_eq!(detector.scorer_mut().reset_calls, 2);
+        assert_eq!(detector.observe_pcm(&[0; 2]).unwrap(), None);
+        assert_eq!(detector.scorer_mut().score_calls, 0);
     }
 
     #[tokio::test]
