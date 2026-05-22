@@ -725,7 +725,6 @@ async fn streaming_trailing_space_can_be_disabled() {
         FakeTranscriptNotifier::default(),
         FakeErrorNotifier::default(),
     )
-    .with_partial_chunking_config(no_chunking())
     .with_append_space(false);
 
     controller
