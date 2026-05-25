@@ -21,7 +21,7 @@ use crate::audio::{
 use crate::config::{health_url, realtime_ws_url, DictateLiveConfig};
 use crate::event::{classify_event, RealtimeEvent, RealtimeHypothesis};
 use crate::phase::{PhaseGate, PhaseResult};
-use crate::speech::{pcm_rms_s16le, DEFAULT_SPEECH_ANALYSIS_FRAME, DEFAULT_SPEECH_RMS_FLOOR};
+use crate::speech::{pcm_rms_s16le, DEFAULT_SPEECH_ANALYSIS_FRAME};
 #[cfg(feature = "debug-recordings")]
 use crate::streaming::preserve_recording_snapshot;
 use crate::streaming::{LiveTranscriber, LiveTranscriptUpdate, LiveTranscriptionSession};
@@ -32,9 +32,9 @@ const REALTIME_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 const REALTIME_NO_FINAL_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const REALTIME_AUDIO_POLL: Duration = Duration::from_millis(40);
 const REALTIME_SPEECH_GATE_PREROLL: Duration = Duration::from_millis(300);
-const REALTIME_SPEECH_GATE_RMS_THRESHOLD: f64 = DEFAULT_SPEECH_RMS_FLOOR;
+const REALTIME_SPEECH_GATE_RMS_THRESHOLD: f64 = 450.0;
 const REALTIME_SPEECH_GATE_FRAME: Duration = DEFAULT_SPEECH_ANALYSIS_FRAME;
-const REALTIME_SPEECH_GATE_MIN_SPEECH: Duration = Duration::from_millis(160);
+const REALTIME_SPEECH_GATE_MIN_SPEECH: Duration = Duration::from_millis(120);
 
 pub struct RunOutcome {
     pub result: PhaseResult,

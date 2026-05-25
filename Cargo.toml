@@ -17,11 +17,11 @@ libc = "0.2"
 libxdo = "0.6.0"
 libxdo-sys = "0.11"
 notify-rust = "4.17.0"
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "test-util", "time"] }
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 toml = "0.8"
 tract-onnx = "0.23.0-dev.5"
 tracing = "0.1"

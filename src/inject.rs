@@ -10,6 +10,7 @@ use anyhow::{bail, Context};
 use serde_json::Value;
 
 pub const DEFAULT_PASTE_SETTLE_DELAY_MS: u64 = 120;
+const MIN_TERMINAL_REPLACE_SETTLE_MS: u32 = 25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FocusedWindow(pub u64);
@@ -435,8 +436,12 @@ impl SwayTextInjector {
         for _ in 0..erase_count {
             command.arg("-k").arg("BackSpace");
         }
-        if self.delay_millis > 0 && erase_count > 0 {
-            command.arg("-s").arg(self.delay_millis.to_string());
+        let replace_settle_millis = match paste_mode {
+            PasteMode::Gui => self.delay_millis,
+            PasteMode::Terminal => self.delay_millis.max(MIN_TERMINAL_REPLACE_SETTLE_MS),
+        };
+        if replace_settle_millis > 0 && erase_count > 0 {
+            command.arg("-s").arg(replace_settle_millis.to_string());
         }
         command.arg("-M").arg("ctrl");
         if matches!(paste_mode, PasteMode::Terminal) {
@@ -1495,7 +1500,39 @@ mod tests {
                 "-k",
                 "BackSpace",
                 "-s",
-                "20",
+                "25",
+                "-M",
+                "ctrl",
+                "-M",
+                "shift",
+                "-P",
+                "v",
+                "-p",
+                "v",
+                "-m",
+                "shift",
+                "-m",
+                "ctrl"
+            ]
+        );
+    }
+
+    #[test]
+    fn sway_terminal_paste_command_uses_minimum_replace_settle_delay() {
+        let injector = test_sway_injector(0);
+        let mut command = injector.wtype_command();
+
+        injector.add_wtype_paste_args(&mut command, 2, PasteMode::Terminal);
+
+        assert_eq!(
+            command_args(&command),
+            vec![
+                "-k",
+                "BackSpace",
+                "-k",
+                "BackSpace",
+                "-s",
+                "25",
                 "-M",
                 "ctrl",
                 "-M",

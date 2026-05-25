@@ -92,13 +92,13 @@ pub fn speech_url(base_url: &str) -> anyhow::Result<Url> {
 }
 
 pub async fn selected_or_clipboard_text() -> anyhow::Result<String> {
-    let primary_error = match read_xclip_selection("primary").await {
+    let primary_error = match read_desktop_selection("primary").await {
         Ok(Some(text)) => return Ok(text),
         Ok(None) => None,
         Err(error) => Some(error),
     };
 
-    match read_xclip_selection("clipboard").await {
+    match read_desktop_selection("clipboard").await {
         Ok(Some(text)) => Ok(text),
         Ok(None) => match primary_error {
             Some(error) => Err(error),
@@ -178,6 +178,40 @@ pub async fn play_audio_file_with_state(
         .with_context(|| format!("failed to wait for audio player {player}"))?;
     remove_playback_pid_if_current(state, child_pid);
     ensure_player_success(player, status)
+}
+
+async fn read_desktop_selection(selection: &str) -> anyhow::Result<Option<String>> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        match read_wl_selection(selection).await {
+            Ok(Some(text)) => return Ok(Some(text)),
+            Ok(None) => {}
+            Err(error) => {
+                if std::env::var_os("DISPLAY").is_none() {
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    read_xclip_selection(selection).await
+}
+
+async fn read_wl_selection(selection: &str) -> anyhow::Result<Option<String>> {
+    let mut command = Command::new("wl-paste");
+    if selection == "primary" {
+        command.arg("--primary");
+    }
+    let output = command
+        .args(["--type", "text"])
+        .output()
+        .await
+        .with_context(|| format!("failed to read Wayland {selection} selection with wl-paste"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(String::from_utf8(output.stdout)
+        .ok()
+        .and_then(|text| normalize_read_aloud_text(&text)))
 }
 
 async fn read_xclip_selection(selection: &str) -> anyhow::Result<Option<String>> {
