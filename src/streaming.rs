@@ -1158,6 +1158,22 @@ mod tests {
         assert_eq!(trim.trailing_silence, Duration::from_millis(300));
     }
 
+    #[test]
+    fn speech_trimming_keeps_quiet_speech() {
+        let sample_rate = 1_000;
+        let pcm = [
+            pcm_for_duration(sample_rate, Duration::from_secs(1), 0),
+            pcm_for_duration(sample_rate, Duration::from_millis(180), 550),
+            pcm_for_duration(sample_rate, Duration::from_millis(300), 0),
+        ]
+        .concat();
+
+        let trim = trim_pcm_to_speech(sample_rate, &pcm);
+
+        assert!(!trim.pcm.is_empty());
+        assert_eq!(trim.leading_trim, Duration::from_millis(500));
+    }
+
     #[tokio::test]
     async fn transcript_snapshot_writes_text_file() {
         let dir = tempfile::tempdir().unwrap();

@@ -4,7 +4,7 @@ use crate::audio::pcm_bytes_for_duration;
 
 pub const DEFAULT_SPEECH_ANALYSIS_FRAME: Duration = Duration::from_millis(20);
 pub const DEFAULT_MIN_SPEECH_DURATION: Duration = Duration::from_millis(120);
-pub const DEFAULT_SPEECH_RMS_FLOOR: f64 = 700.0;
+pub const DEFAULT_SPEECH_RMS_FLOOR: f64 = 500.0;
 pub const DEFAULT_MAX_SPEECH_RMS_FLOOR: f64 = 1_500.0;
 pub const DEFAULT_NOISE_FLOOR_MULTIPLIER: f64 = 4.0;
 pub const DEFAULT_NOISE_SAMPLE_DURATION: Duration = Duration::from_secs(1);
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn adaptive_threshold_uses_floor_without_noise_sample() {
-        assert_eq!(SpeechActivityDetector::new(16_000).threshold(), 700.0);
+        assert_eq!(SpeechActivityDetector::new(16_000).threshold(), 500.0);
     }
 
     #[test]
