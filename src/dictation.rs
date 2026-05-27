@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 
 use crate::audio::{
-    start_raw_pcm_recording, stop_raw_pcm_recording, RawPcmRecording, STT_SAMPLE_RATE,
+    start_raw_pcm_recording_with_config, stop_raw_pcm_recording, AudioCaptureConfig,
+    RawPcmRecording, STT_SAMPLE_RATE,
 };
 use crate::clock::unix_millis;
 use crate::daemon::{DaemonResponse, HotkeyHandler};
@@ -167,6 +168,7 @@ where
 pub struct PwRecordRecorder {
     output_dir: PathBuf,
     sample_rate: u32,
+    denoise: bool,
 }
 
 impl PwRecordRecorder {
@@ -174,11 +176,17 @@ impl PwRecordRecorder {
         Self {
             output_dir,
             sample_rate: STT_SAMPLE_RATE,
+            denoise: false,
         }
     }
 
     pub fn with_sample_rate(mut self, sample_rate: u32) -> Self {
         self.sample_rate = sample_rate;
+        self
+    }
+
+    pub fn with_denoise(mut self, denoise: bool) -> Self {
+        self.denoise = denoise;
         self
     }
 }
@@ -195,7 +203,10 @@ impl Recorder for PwRecordRecorder {
 
     async fn start(&self) -> anyhow::Result<Self::Recording> {
         let output_path = self.output_dir.join(recording_file_name());
-        let inner = start_raw_pcm_recording(self.sample_rate).await?;
+        let inner = start_raw_pcm_recording_with_config(
+            AudioCaptureConfig::new(self.sample_rate).with_denoise(self.denoise),
+        )
+        .await?;
         Ok(PwRecording {
             inner,
             output_path,

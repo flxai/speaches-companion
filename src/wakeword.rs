@@ -13,8 +13,9 @@ use tokio::time::{sleep, Instant};
 use tract_onnx::prelude::*;
 
 use crate::audio::{
-    pcm_bytes_for_duration, snapshot_streaming_pcm, start_streaming_pcm_capture, write_pcm_wav,
-    SharedPcmBuffer, StreamingPcmCapture, StreamingPcmSession, STT_SAMPLE_RATE,
+    pcm_bytes_for_duration, snapshot_streaming_pcm, start_streaming_pcm_capture_with_config,
+    write_pcm_wav, AudioCaptureConfig, SharedPcmBuffer, StreamingPcmCapture, StreamingPcmSession,
+    STT_SAMPLE_RATE,
 };
 use crate::clock::unix_millis;
 use crate::daemon::{DaemonResponse, HotkeyHandler};
@@ -122,6 +123,7 @@ pub struct WakewordRunConfig {
     pub stt_options: TranscribeOptions,
     pub append_space: bool,
     pub notify_on_detect: bool,
+    pub denoise: bool,
     pub streaming: Option<WakewordStreamingConfig>,
 }
 
@@ -868,8 +870,8 @@ where
     I: TextInjector + Clone + Send + 'static,
 {
     let _paths = wakeword_paths(&config.settings)?;
-    let capture = start_streaming_pcm_capture(
-        STT_SAMPLE_RATE,
+    let capture = start_streaming_pcm_capture_with_config(
+        AudioCaptureConfig::new(STT_SAMPLE_RATE).with_denoise(config.denoise),
         Duration::from_millis(DEFAULT_WAKEWORD_IDLE_RETAIN_MS),
     )
     .await

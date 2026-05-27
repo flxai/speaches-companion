@@ -15,8 +15,9 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::audio::{
-    capture_with_pw_record, pcm_bytes_for_duration, pcm_duration, start_streaming_pcm_capture,
-    SharedPcmBuffer, StreamingPcmCapture, StreamingPcmSession, CHUNK_BYTES, SAMPLE_RATE,
+    capture_with_pw_record, pcm_bytes_for_duration, pcm_duration,
+    start_streaming_pcm_capture_with_config, AudioCaptureConfig, SharedPcmBuffer,
+    StreamingPcmCapture, StreamingPcmSession, CHUNK_BYTES, SAMPLE_RATE,
 };
 use crate::config::{health_url, realtime_ws_url, DictateLiveConfig};
 use crate::event::{classify_event, RealtimeEvent, RealtimeHypothesis};
@@ -53,6 +54,7 @@ pub struct RealtimeTranscriber {
     preroll: Duration,
     sample_rate: u32,
     final_pass: bool,
+    denoise: bool,
 }
 
 pub struct RealtimeSession {
@@ -245,6 +247,7 @@ impl RealtimeTranscriber {
             preroll: Duration::from_millis(750),
             sample_rate: SAMPLE_RATE,
             final_pass: true,
+            denoise: false,
         }
     }
 
@@ -255,6 +258,11 @@ impl RealtimeTranscriber {
 
     pub fn with_final_pass(mut self, final_pass: bool) -> Self {
         self.final_pass = final_pass;
+        self
+    }
+
+    pub fn with_denoise(mut self, denoise: bool) -> Self {
+        self.denoise = denoise;
         self
     }
 
@@ -306,7 +314,11 @@ impl RealtimeTranscriber {
             return Ok(capture.shared_pcm());
         }
 
-        let started_capture = start_streaming_pcm_capture(self.sample_rate, self.preroll).await?;
+        let started_capture = start_streaming_pcm_capture_with_config(
+            AudioCaptureConfig::new(self.sample_rate).with_denoise(self.denoise),
+            self.preroll,
+        )
+        .await?;
         let shared_pcm = started_capture.shared_pcm();
         *capture = Some(started_capture);
         Ok(shared_pcm)

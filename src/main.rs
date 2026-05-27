@@ -133,6 +133,10 @@ struct DaemonArgs {
     leading_silence_ms: Option<u64>,
     #[arg(long)]
     preroll_ms: Option<u64>,
+    #[arg(long, conflicts_with = "no_denoise")]
+    denoise: bool,
+    #[arg(long)]
+    no_denoise: bool,
 }
 
 #[derive(Debug, Args)]
@@ -349,7 +353,8 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
     if daemon_settings.realtime_partials {
         let transcriber = RealtimeTranscriber::new(config.base_url, config.model, config.language)
             .with_preroll(Duration::from_millis(daemon_settings.preroll_ms))
-            .with_final_pass(daemon_settings.final_pass);
+            .with_final_pass(daemon_settings.final_pass)
+            .with_denoise(daemon_settings.denoise);
         #[cfg(feature = "debug-recordings")]
         let transcriber = transcriber.with_record_dir(daemon_settings.record_dir.clone());
         match prepare_realtime_daemon_transcriber(transcriber).await {
@@ -376,6 +381,7 @@ async fn run_daemon_command(args: DaemonArgs) -> ExitCode {
         )
         .with_leading_silence(Duration::from_millis(daemon_settings.leading_silence_ms))
         .with_preroll(Duration::from_millis(daemon_settings.preroll_ms))
+        .with_denoise(daemon_settings.denoise)
         .with_transcript_dir(daemon_settings.transcript_dir.clone());
         #[cfg(feature = "debug-recordings")]
         let transcriber = transcriber.with_record_dir(daemon_settings.record_dir.clone());
@@ -427,6 +433,7 @@ async fn run_wakeword_command(args: WakewordArgs) -> ExitCode {
         },
         append_space: resolve_wakeword_append_space(&args, &file_config),
         notify_on_detect: resolve_wakeword_notify_on_detect(&args, &file_config),
+        denoise: resolve_wakeword_denoise(&file_config),
         streaming,
     };
     let injector = DesktopTextInjector::new_with_options(
@@ -496,7 +503,8 @@ async fn build_wakeword_streaming_config(
     // Wake detection uses a separate 16 kHz capture; do not feed the wake phrase
     // from realtime pre-roll into the dictated command.
     .with_preroll(Duration::ZERO)
-    .with_final_pass(final_pass);
+    .with_final_pass(final_pass)
+    .with_denoise(resolve_wakeword_denoise(file_config));
     #[cfg(feature = "debug-recordings")]
     let transcriber = transcriber.with_record_dir(file_config.dictation.record_dir.clone());
     let transcriber = prepare_realtime_daemon_transcriber(transcriber).await?;
@@ -593,6 +601,7 @@ struct DaemonSettings {
     paste_in_terminals: bool,
     leading_silence_ms: u64,
     preroll_ms: u64,
+    denoise: bool,
 }
 
 fn resolve_daemon_settings(args: &DaemonArgs, file_config: &FileConfig) -> DaemonSettings {
@@ -638,6 +647,7 @@ fn resolve_daemon_settings(args: &DaemonArgs, file_config: &FileConfig) -> Daemo
             .preroll_ms
             .or(file_config.dictation.preroll_ms)
             .unwrap_or(DEFAULT_PREROLL_MS),
+        denoise: resolve_denoise(args, file_config),
     }
 }
 
@@ -777,6 +787,16 @@ fn resolve_append_space(args: &DaemonArgs, file_config: &FileConfig) -> bool {
     }
 }
 
+fn resolve_denoise(args: &DaemonArgs, file_config: &FileConfig) -> bool {
+    if args.denoise {
+        true
+    } else if args.no_denoise {
+        false
+    } else {
+        file_config.dictation.denoise.unwrap_or(false)
+    }
+}
+
 fn resolve_wakeword_append_space(args: &WakewordArgs, file_config: &FileConfig) -> bool {
     if args.append_space {
         true
@@ -785,6 +805,10 @@ fn resolve_wakeword_append_space(args: &WakewordArgs, file_config: &FileConfig) 
     } else {
         file_config.dictation.append_space.unwrap_or(true)
     }
+}
+
+fn resolve_wakeword_denoise(file_config: &FileConfig) -> bool {
+    file_config.dictation.denoise.unwrap_or(false)
 }
 
 fn resolve_wakeword_notify_on_detect(args: &WakewordArgs, file_config: &FileConfig) -> bool {
@@ -1247,6 +1271,7 @@ mod tests {
         assert!(settings.final_pass);
         assert!(settings.append_space);
         assert_eq!(settings.preroll_ms, DEFAULT_PREROLL_MS);
+        assert!(!settings.denoise);
     }
 
     #[test]
@@ -1290,6 +1315,7 @@ mod tests {
                 paste_in_terminals: Some(true),
                 leading_silence_ms: Some(400),
                 preroll_ms: Some(1_000),
+                denoise: Some(true),
             },
             ..FileConfig::default()
         };
@@ -1313,6 +1339,7 @@ mod tests {
         assert!(settings.paste_in_terminals);
         assert_eq!(settings.leading_silence_ms, 400);
         assert_eq!(settings.preroll_ms, 1_000);
+        assert!(settings.denoise);
     }
 
     #[test]
@@ -1361,6 +1388,24 @@ mod tests {
         let settings = resolve_daemon_settings(&args, &file_config);
 
         assert!(!settings.final_pass);
+    }
+
+    #[test]
+    fn daemon_can_enable_and_disable_denoise() {
+        let args = parse_daemon_args(["speaches-companion", "daemon", "--denoise"]);
+        let settings = resolve_daemon_settings(&args, &FileConfig::default());
+        assert!(settings.denoise);
+
+        let args = parse_daemon_args(["speaches-companion", "daemon", "--no-denoise"]);
+        let file_config = FileConfig {
+            dictation: DictationFileConfig {
+                denoise: Some(true),
+                ..DictationFileConfig::default()
+            },
+            ..FileConfig::default()
+        };
+        let settings = resolve_daemon_settings(&args, &file_config);
+        assert!(!settings.denoise);
     }
 
     #[tokio::test]
@@ -1580,6 +1625,7 @@ mod tests {
             dictation: DictationFileConfig {
                 append_space: Some(true),
                 inject_delay_microsecs: Some(40),
+                denoise: Some(true),
                 ..DictationFileConfig::default()
             },
             ..FileConfig::default()
@@ -1597,6 +1643,7 @@ mod tests {
         assert!(!resolve_wakeword_notify_on_detect(&args, &file_config));
         assert!(!resolve_wakeword_append_space(&args, &file_config));
         assert_eq!(resolve_wakeword_inject_delay(&args, &file_config), 3_000);
+        assert!(resolve_wakeword_denoise(&file_config));
     }
 
     #[test]

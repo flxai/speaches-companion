@@ -186,6 +186,7 @@ paste_settle_delay_ms = 450
 paste_in_terminals = true
 leading_silence_ms = 400
 preroll_ms = 1000
+denoise = true
 
 [wakeword]
 name = "hey_computer"
@@ -236,6 +237,7 @@ notify_on_detect = true
     assert_eq!(config.dictation.paste_in_terminals, Some(true));
     assert_eq!(config.dictation.leading_silence_ms, Some(400));
     assert_eq!(config.dictation.preroll_ms, Some(1000));
+    assert_eq!(config.dictation.denoise, Some(true));
     assert_eq!(
         config.wakeword.root_dir.as_deref(),
         Some(Path::new("wakewords"))

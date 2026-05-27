@@ -18,12 +18,151 @@ pub const CHANNELS: u16 = 1;
 pub const SAMPLE_FORMAT: &str = "s16";
 pub const CHUNK_BYTES: usize = 4_096;
 pub const STT_SAMPLE_RATE: u32 = 16_000;
+pub const DENOISE_SAMPLE_RATE: u32 = 48_000;
 const STREAMING_CAPTURE_READY_TIMEOUT: Duration = Duration::from_secs(2);
 const STREAMING_CAPTURE_READY_POLL: Duration = Duration::from_millis(10);
+const DENOISE_FRAME_SAMPLES: usize = nnnoiseless::DenoiseState::FRAME_SIZE;
+const DENOISE_FRAME_BYTES: usize = DENOISE_FRAME_SAMPLES * 2;
 
 pub struct RawPcmRecording {
     child: Child,
     read_task: JoinHandle<Result<Vec<u8>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioCaptureConfig {
+    pub sample_rate: u32,
+    pub denoise: bool,
+}
+
+impl AudioCaptureConfig {
+    pub fn new(sample_rate: u32) -> Self {
+        Self {
+            sample_rate,
+            denoise: false,
+        }
+    }
+
+    pub fn with_denoise(mut self, denoise: bool) -> Self {
+        self.denoise = denoise;
+        self
+    }
+
+    fn pw_record_sample_rate(self) -> Result<u32> {
+        if self.denoise {
+            validate_denoise_output_sample_rate(self.sample_rate)?;
+            Ok(DENOISE_SAMPLE_RATE)
+        } else {
+            Ok(self.sample_rate)
+        }
+    }
+}
+
+enum AudioCaptureProcessor {
+    Passthrough,
+    Denoise(Box<PcmDenoiser>),
+}
+
+impl AudioCaptureProcessor {
+    fn try_new(config: AudioCaptureConfig) -> Result<Self> {
+        if config.denoise {
+            Ok(Self::Denoise(Box::new(PcmDenoiser::new(
+                config.sample_rate,
+            )?)))
+        } else {
+            Ok(Self::Passthrough)
+        }
+    }
+
+    fn process(&mut self, chunk: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Passthrough => chunk.to_vec(),
+            Self::Denoise(denoiser) => denoiser.process(chunk),
+        }
+    }
+}
+
+struct PcmDenoiser {
+    output_sample_rate: u32,
+    downsample_ratio: usize,
+    state: Box<nnnoiseless::DenoiseState<'static>>,
+    pending: Vec<u8>,
+    input_frame: [f32; DENOISE_FRAME_SAMPLES],
+    output_frame: [f32; DENOISE_FRAME_SAMPLES],
+}
+
+impl PcmDenoiser {
+    fn new(output_sample_rate: u32) -> Result<Self> {
+        let downsample_ratio = validate_denoise_output_sample_rate(output_sample_rate)?;
+        Ok(Self {
+            output_sample_rate,
+            downsample_ratio,
+            state: nnnoiseless::DenoiseState::new(),
+            pending: Vec::new(),
+            input_frame: [0.0; DENOISE_FRAME_SAMPLES],
+            output_frame: [0.0; DENOISE_FRAME_SAMPLES],
+        })
+    }
+
+    fn process(&mut self, chunk: &[u8]) -> Vec<u8> {
+        self.pending.extend_from_slice(chunk);
+        let complete_frames = self.pending.len() / DENOISE_FRAME_BYTES;
+        if complete_frames == 0 {
+            return Vec::new();
+        }
+
+        let output_samples_per_frame = DENOISE_FRAME_SAMPLES / self.downsample_ratio;
+        let mut denoised = Vec::with_capacity(complete_frames * output_samples_per_frame * 2);
+        for frame_index in 0..complete_frames {
+            let frame_start = frame_index * DENOISE_FRAME_BYTES;
+            let frame_end = frame_start + DENOISE_FRAME_BYTES;
+            for (sample_index, sample) in self.pending[frame_start..frame_end]
+                .chunks_exact(2)
+                .enumerate()
+            {
+                self.input_frame[sample_index] = i16::from_le_bytes([sample[0], sample[1]]) as f32;
+            }
+
+            self.state
+                .process_frame(&mut self.output_frame, &self.input_frame);
+            downsample_denoised_frame(
+                &self.output_frame,
+                self.downsample_ratio,
+                self.output_sample_rate,
+                &mut denoised,
+            );
+        }
+
+        self.pending.drain(..complete_frames * DENOISE_FRAME_BYTES);
+        denoised
+    }
+}
+
+fn validate_denoise_output_sample_rate(sample_rate: u32) -> Result<usize> {
+    match sample_rate {
+        STT_SAMPLE_RATE => Ok(3),
+        SAMPLE_RATE => Ok(2),
+        _ => bail!(
+            "RNNoise denoising supports only {STT_SAMPLE_RATE} Hz or {SAMPLE_RATE} Hz output, got {sample_rate} Hz"
+        ),
+    }
+}
+
+fn downsample_denoised_frame(
+    frame: &[f32; DENOISE_FRAME_SAMPLES],
+    ratio: usize,
+    output_sample_rate: u32,
+    output: &mut Vec<u8>,
+) {
+    debug_assert_eq!(DENOISE_SAMPLE_RATE % output_sample_rate, 0);
+    for samples in frame.chunks_exact(ratio) {
+        let average = samples.iter().sum::<f32>() / ratio as f32;
+        output.extend_from_slice(&f32_to_i16(average).to_le_bytes());
+    }
+}
+
+fn f32_to_i16(sample: f32) -> i16 {
+    sample.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
 }
 
 pub type SharedPcmBuffer = Arc<Mutex<StreamingPcmBuffer>>;
@@ -199,16 +338,30 @@ pub async fn append_test_streaming_pcm(pcm: &SharedPcmBuffer, chunk: &[u8]) {
     pcm.lock().await.append(chunk);
 }
 
-pub async fn capture_with_pw_record<F, Fut>(duration: Duration, mut on_chunk: F) -> Result<usize>
+pub async fn capture_with_pw_record<F, Fut>(duration: Duration, on_chunk: F) -> Result<usize>
 where
     F: FnMut(Vec<u8>) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
+    capture_with_pw_record_config(duration, AudioCaptureConfig::new(SAMPLE_RATE), on_chunk).await
+}
+
+pub async fn capture_with_pw_record_config<F, Fut>(
+    duration: Duration,
+    config: AudioCaptureConfig,
+    mut on_chunk: F,
+) -> Result<usize>
+where
+    F: FnMut(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let pw_record_sample_rate = config.pw_record_sample_rate()?;
+    let mut processor = AudioCaptureProcessor::try_new(config)?;
     let mut child = Command::new("pw-record")
         .args([
             "--raw",
             "--rate",
-            &SAMPLE_RATE.to_string(),
+            &pw_record_sample_rate.to_string(),
             "--channels",
             &CHANNELS.to_string(),
             "--format",
@@ -244,8 +397,11 @@ where
         }
 
         chunk.truncate(read);
-        total_bytes += read;
-        on_chunk(chunk).await?;
+        let chunk = processor.process(&chunk);
+        if !chunk.is_empty() {
+            total_bytes += chunk.len();
+            on_chunk(chunk).await?;
+        }
     }
 
     let _ = child.start_kill();
@@ -254,11 +410,19 @@ where
 }
 
 pub async fn start_raw_pcm_recording(sample_rate: u32) -> Result<RawPcmRecording> {
+    start_raw_pcm_recording_with_config(AudioCaptureConfig::new(sample_rate)).await
+}
+
+pub async fn start_raw_pcm_recording_with_config(
+    config: AudioCaptureConfig,
+) -> Result<RawPcmRecording> {
+    let pw_record_sample_rate = config.pw_record_sample_rate()?;
+    let mut processor = AudioCaptureProcessor::try_new(config)?;
     let mut child = Command::new("pw-record")
         .args([
             "--raw",
             "--rate",
-            &sample_rate.to_string(),
+            &pw_record_sample_rate.to_string(),
             "--channels",
             &CHANNELS.to_string(),
             "--format",
@@ -285,7 +449,8 @@ pub async fn start_raw_pcm_recording(sample_rate: u32) -> Result<RawPcmRecording
             if read == 0 {
                 break;
             }
-            pcm.extend_from_slice(&chunk[..read]);
+            let processed = processor.process(&chunk[..read]);
+            pcm.extend_from_slice(&processed);
         }
         Ok(pcm)
     });
@@ -297,11 +462,20 @@ pub async fn start_streaming_pcm_capture(
     sample_rate: u32,
     idle_retain: Duration,
 ) -> Result<StreamingPcmCapture> {
+    start_streaming_pcm_capture_with_config(AudioCaptureConfig::new(sample_rate), idle_retain).await
+}
+
+pub async fn start_streaming_pcm_capture_with_config(
+    config: AudioCaptureConfig,
+    idle_retain: Duration,
+) -> Result<StreamingPcmCapture> {
+    let pw_record_sample_rate = config.pw_record_sample_rate()?;
+    let mut processor = AudioCaptureProcessor::try_new(config)?;
     let mut child = Command::new("pw-record")
         .args([
             "--raw",
             "--rate",
-            &sample_rate.to_string(),
+            &pw_record_sample_rate.to_string(),
             "--channels",
             &CHANNELS.to_string(),
             "--format",
@@ -318,7 +492,7 @@ pub async fn start_streaming_pcm_capture(
         .take()
         .context("pw-record did not expose stdout")?;
     let pcm = Arc::new(Mutex::new(StreamingPcmBuffer::new(
-        sample_rate,
+        config.sample_rate,
         idle_retain,
     )));
     let task_pcm = Arc::clone(&pcm);
@@ -332,7 +506,10 @@ pub async fn start_streaming_pcm_capture(
             if read == 0 {
                 break;
             }
-            task_pcm.lock().await.append(&chunk[..read]);
+            let processed = processor.process(&chunk[..read]);
+            if !processed.is_empty() {
+                task_pcm.lock().await.append(&processed);
+            }
         }
         Ok(())
     });
@@ -555,6 +732,67 @@ pub async fn record_wav_with_pw_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_capture_processor_passes_through_when_denoise_is_disabled() {
+        let mut processor =
+            AudioCaptureProcessor::try_new(AudioCaptureConfig::new(STT_SAMPLE_RATE)).unwrap();
+
+        assert_eq!(processor.process(&[1, 2, 3, 4]), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn denoise_processor_outputs_16khz_pcm_from_48khz_frames() {
+        let mut processor = AudioCaptureProcessor::try_new(
+            AudioCaptureConfig::new(STT_SAMPLE_RATE).with_denoise(true),
+        )
+        .unwrap();
+        let input = vec![0; DENOISE_FRAME_BYTES];
+
+        let output = processor.process(&input);
+
+        assert_eq!(output.len(), DENOISE_FRAME_SAMPLES / 3 * 2);
+    }
+
+    #[test]
+    fn denoise_processor_outputs_24khz_pcm_from_48khz_frames() {
+        let mut processor =
+            AudioCaptureProcessor::try_new(AudioCaptureConfig::new(SAMPLE_RATE).with_denoise(true))
+                .unwrap();
+        let input = vec![0; DENOISE_FRAME_BYTES];
+
+        let output = processor.process(&input);
+
+        assert_eq!(output.len(), DENOISE_FRAME_SAMPLES / 2 * 2);
+    }
+
+    #[test]
+    fn denoise_processor_rejects_unsupported_output_sample_rates() {
+        let error =
+            match AudioCaptureProcessor::try_new(AudioCaptureConfig::new(8_000).with_denoise(true))
+            {
+                Ok(_) => panic!("unsupported denoise sample rate should be rejected"),
+                Err(error) => error,
+            };
+
+        assert!(error.to_string().contains("supports only"));
+    }
+
+    #[test]
+    fn denoise_processor_buffers_partial_frames() {
+        let mut processor = AudioCaptureProcessor::try_new(
+            AudioCaptureConfig::new(STT_SAMPLE_RATE).with_denoise(true),
+        )
+        .unwrap();
+        let first_half = vec![0; DENOISE_FRAME_BYTES / 2];
+        let second_half = vec![0; DENOISE_FRAME_BYTES / 2];
+
+        assert!(processor.process(&first_half).is_empty());
+        assert_eq!(
+            processor.process(&second_half).len(),
+            DENOISE_FRAME_SAMPLES / 3 * 2
+        );
+    }
 
     #[tokio::test]
     async fn wait_for_streaming_pcm_returns_after_audio_arrives() {

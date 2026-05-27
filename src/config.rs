@@ -74,6 +74,7 @@ pub struct DictationFileConfig {
     pub paste_in_terminals: Option<bool>,
     pub leading_silence_ms: Option<u64>,
     pub preroll_ms: Option<u64>,
+    pub denoise: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]

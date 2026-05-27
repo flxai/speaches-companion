@@ -16,6 +16,7 @@ futures-util = "0.3"
 libc = "0.2"
 libxdo = "0.6.0"
 libxdo-sys = "0.11"
+nnnoiseless = { version = "0.5.2", default-features = false }
 notify-rust = "4.17.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots"] }
 serde = { version = "1", features = ["derive"] }

@@ -12,8 +12,8 @@ use tokio::time::Instant;
 #[cfg(feature = "debug-recordings")]
 use crate::audio::write_pcm_mp3;
 use crate::audio::{
-    pcm_bytes_for_duration, pcm_duration, start_streaming_pcm_capture, write_pcm_wav,
-    SharedPcmBuffer, StreamingPcmCapture, StreamingPcmSession, STT_SAMPLE_RATE,
+    pcm_bytes_for_duration, pcm_duration, start_streaming_pcm_capture_with_config, write_pcm_wav,
+    AudioCaptureConfig, SharedPcmBuffer, StreamingPcmCapture, StreamingPcmSession, STT_SAMPLE_RATE,
 };
 use crate::daemon::{DaemonResponse, HotkeyHandler};
 use crate::inject::{
@@ -750,6 +750,7 @@ pub struct FinalHttpTranscriber {
     leading_silence: Duration,
     preroll: Duration,
     sample_rate: u32,
+    denoise: bool,
 }
 
 impl FinalHttpTranscriber {
@@ -764,6 +765,7 @@ impl FinalHttpTranscriber {
             leading_silence: Duration::from_millis(250),
             preroll: Duration::from_millis(750),
             sample_rate: STT_SAMPLE_RATE,
+            denoise: false,
         }
     }
 
@@ -774,6 +776,11 @@ impl FinalHttpTranscriber {
 
     pub fn with_preroll(mut self, duration: Duration) -> Self {
         self.preroll = duration;
+        self
+    }
+
+    pub fn with_denoise(mut self, denoise: bool) -> Self {
+        self.denoise = denoise;
         self
     }
 
@@ -819,7 +826,11 @@ impl FinalHttpTranscriber {
             return Ok(capture.shared_pcm());
         }
 
-        let started_capture = start_streaming_pcm_capture(self.sample_rate, self.preroll).await?;
+        let started_capture = start_streaming_pcm_capture_with_config(
+            AudioCaptureConfig::new(self.sample_rate).with_denoise(self.denoise),
+            self.preroll,
+        )
+        .await?;
         let shared_pcm = started_capture.shared_pcm();
         *capture = Some(started_capture);
         Ok(shared_pcm)

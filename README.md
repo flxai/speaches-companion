@@ -122,6 +122,7 @@ paste_settle_delay_ms = 450
 paste_in_terminals = true
 leading_silence_ms = 250
 preroll_ms = 750
+denoise = false
 
 [wakeword]
 # bare `speaches-companion wakeword` uses this profile name by default
@@ -201,6 +202,10 @@ Final dictation text gets one trailing space by default, so the next typed word
 starts naturally after the injected transcript. Use `append_space = false` or
 `--no-append-space` to keep the transcript exact after trimming.
 
+RNNoise-style microphone denoising is disabled by default. Enable it with
+`denoise = true` or `--denoise` when stationary background noise is hurting
+recognition; use `--no-denoise` to override a config file for daemon dictation.
+
 The daemon inserts `💬` after audio capture starts, moves the cursor left, and
 keeps it as a trailing live marker while dictation is active. It removes the
 marker again when the final or fallback text is committed. Override or disable
@@ -265,11 +270,11 @@ predownloaded assets instead of downloading them on demand. The flake also
 exposes `.#openwakeword-assets` for prefetching those stock ONNX files
 explicitly.
 
-Wakeword dictation follows the same `[dictation]` injection policy as hotkey
-dictation. With `realtime_partials = true`, wakeword mode starts realtime
-streaming after the wake phrase and injects inline partials while you speak;
-with `realtime_partials = false`, it records until silence and injects one final
-transcript.
+Wakeword dictation follows the same `[dictation]` audio and injection policy as
+hotkey dictation, including `denoise`. With `realtime_partials = true`, wakeword
+mode starts realtime streaming after the wake phrase and injects inline partials
+while you speak; with `realtime_partials = false`, it records until silence and
+injects one final transcript.
 
 `name` is the local profile directory, while `stock_model` only chooses the
 fallback keyword head to install when `wakeword.root_dir/<name>/model.onnx` is
