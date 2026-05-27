@@ -10,7 +10,7 @@ use tokio::time::{sleep, Duration, Instant};
 fn speech_url_uses_openai_compatible_audio_speech_path() {
     let url = speech_url("http://localhost:8000/base?ignored=true").unwrap();
 
-    assert_eq!(url.as_str(), "http://localhost:8000/v1/audio/speech");
+    assert_eq!(url.as_str(), "http://localhost:8000/base/v1/audio/speech");
 }
 
 #[test]

@@ -2,9 +2,10 @@ use std::path::Path;
 
 use anyhow::{bail, Context};
 use reqwest::multipart::{Form, Part};
-use reqwest::Url;
 use serde::Deserialize;
+use url::Url;
 
+use crate::config::api_url;
 use crate::text::non_empty_str;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,9 +170,5 @@ fn sse_data_events(body: &str) -> Vec<String> {
 }
 
 fn transcription_url(base_url: &str) -> anyhow::Result<Url> {
-    let mut url =
-        Url::parse(base_url).with_context(|| format!("invalid Speaches base URL: {base_url}"))?;
-    url.set_path("/v1/audio/transcriptions");
-    url.set_query(None);
-    Ok(url)
+    api_url(base_url, "v1/audio/transcriptions")
 }

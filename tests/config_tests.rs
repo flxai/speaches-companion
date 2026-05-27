@@ -367,3 +367,18 @@ fn realtime_url_encodes_optional_language() {
         "wss://speaches.example/v1/realtime?intent=transcription&model=model%2Fwith+spaces&language=de"
     );
 }
+
+#[test]
+fn realtime_url_preserves_base_path() {
+    let url = realtime_ws_url(
+        "https://speaches.example/speaches?ignored=true",
+        "Systran/faster-whisper-large-v3",
+        None,
+    )
+    .expect("valid url");
+
+    assert_eq!(
+        url,
+        "wss://speaches.example/speaches/v1/realtime?intent=transcription&model=Systran%2Ffaster-whisper-large-v3"
+    );
+}

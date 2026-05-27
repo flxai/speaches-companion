@@ -13,6 +13,7 @@ use tokio::time::{sleep, Duration};
 use url::Url;
 
 use crate::clock::unix_millis;
+use crate::config::api_url;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpeechOptions {
@@ -84,11 +85,7 @@ pub async fn synthesize_speech(
 }
 
 pub fn speech_url(base_url: &str) -> anyhow::Result<Url> {
-    let mut url =
-        Url::parse(base_url).with_context(|| format!("invalid Speaches base URL: {base_url}"))?;
-    url.set_path("/v1/audio/speech");
-    url.set_query(None);
-    Ok(url)
+    api_url(base_url, "v1/audio/speech")
 }
 
 pub async fn selected_or_clipboard_text() -> anyhow::Result<String> {

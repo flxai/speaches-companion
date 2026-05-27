@@ -283,13 +283,28 @@ pub fn default_config_path_with_env(env: &BTreeMap<String, String>) -> anyhow::R
     bail!("failed to resolve speaches-companion config path: XDG_CONFIG_HOME and HOME are unset")
 }
 
+pub(crate) fn api_url(base_url: &str, api_path: &str) -> anyhow::Result<Url> {
+    let mut url =
+        Url::parse(base_url).with_context(|| format!("invalid Speaches base URL: {base_url}"))?;
+    let base_path = url.path().trim_end_matches('/');
+    let api_path = api_path.trim_start_matches('/');
+    let path = if base_path.is_empty() {
+        format!("/{api_path}")
+    } else {
+        format!("{base_path}/{api_path}")
+    };
+
+    url.set_path(&path);
+    url.set_query(None);
+    Ok(url)
+}
+
 pub fn realtime_ws_url(
     base_url: &str,
     model: &str,
     language: Option<&str>,
 ) -> anyhow::Result<String> {
-    let mut url =
-        Url::parse(base_url).with_context(|| format!("invalid Speaches base URL: {base_url}"))?;
+    let mut url = api_url(base_url, "v1/realtime")?;
     let scheme = match url.scheme() {
         "http" => "ws",
         "https" => "wss",
@@ -297,7 +312,6 @@ pub fn realtime_ws_url(
     };
     url.set_scheme(scheme)
         .map_err(|_| anyhow::anyhow!("failed to set websocket URL scheme"))?;
-    url.set_path("/v1/realtime");
     url.set_query(None);
     {
         let mut query = url.query_pairs_mut();
@@ -311,10 +325,7 @@ pub fn realtime_ws_url(
 }
 
 pub fn health_url(base_url: &str) -> anyhow::Result<String> {
-    let mut url =
-        Url::parse(base_url).with_context(|| format!("invalid Speaches base URL: {base_url}"))?;
-    url.set_path("/health");
-    url.set_query(None);
+    let url = api_url(base_url, "health")?;
     Ok(url.to_string())
 }
 
