@@ -1116,15 +1116,17 @@ where
         }
 
         self.injector.inject_text(marker)?;
-        self.injector.move_cursor_left(marker.chars().count())?;
+        self.injector
+            .move_cursor_left(marker_cursor_step_count(marker))?;
         self.trailing_marker = Some(marker.to_string());
         Ok(true)
     }
 
     pub fn hide_trailing_marker(&mut self) -> anyhow::Result<bool> {
-        let Some(count) = self.trailing_marker.as_ref().map(|marker| marker.chars().count()) else {
+        let Some(marker) = self.trailing_marker.as_ref() else {
             return Ok(false);
         };
+        let count = marker_cursor_step_count(marker);
         self.ensure_target_is_still_focused()?;
 
         self.injector.move_cursor_right(count)?;
@@ -1171,6 +1173,51 @@ fn common_prefix_byte_len(left: &str, right: &str) -> usize {
         prefix_bytes += left_ch.len_utf8();
     }
     prefix_bytes
+}
+
+fn marker_cursor_step_count(marker: &str) -> usize {
+    let mut count = 0;
+    let mut joined_to_previous = false;
+
+    for ch in marker.chars() {
+        if is_variation_selector(ch) || is_combining_mark(ch) || is_emoji_modifier(ch) {
+            continue;
+        }
+        if ch == '\u{200d}' {
+            joined_to_previous = true;
+            continue;
+        }
+        if joined_to_previous {
+            joined_to_previous = false;
+            continue;
+        }
+        count += 1;
+    }
+
+    if count == 0 && !marker.is_empty() {
+        1
+    } else {
+        count
+    }
+}
+
+fn is_variation_selector(ch: char) -> bool {
+    ('\u{fe00}'..='\u{fe0f}').contains(&ch) || ('\u{e0100}'..='\u{e01ef}').contains(&ch)
+}
+
+fn is_combining_mark(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x0300..=0x036f
+            | 0x1ab0..=0x1aff
+            | 0x1dc0..=0x1dff
+            | 0x20d0..=0x20ff
+            | 0xfe20..=0xfe2f
+    )
+}
+
+fn is_emoji_modifier(ch: char) -> bool {
+    matches!(ch as u32, 0x1f3fb..=0x1f3ff)
 }
 
 pub fn normalize_transcript_for_injection(transcript: &str) -> Option<String> {
@@ -1303,6 +1350,29 @@ mod tests {
             *operations.lock().unwrap(),
             vec![
                 InjectOperation::Type("💬".to_string()),
+                InjectOperation::CursorLeft(1),
+                InjectOperation::Type("hello".to_string()),
+                InjectOperation::CursorRight(1),
+                InjectOperation::Backspace(1),
+            ]
+        );
+        assert_eq!(session.inserted_text(), "hello");
+    }
+
+    #[test]
+    fn trailing_marker_counts_variation_selector_as_same_cursor_step() {
+        let injector = FakeInjector::default();
+        let operations = injector.operations.clone();
+        let mut session = SpeculativeTextSession::start(injector).unwrap();
+
+        session.show_trailing_marker("🖊️").unwrap();
+        session.replace_text("hello").unwrap();
+        session.hide_trailing_marker().unwrap();
+
+        assert_eq!(
+            *operations.lock().unwrap(),
+            vec![
+                InjectOperation::Type("🖊️".to_string()),
                 InjectOperation::CursorLeft(1),
                 InjectOperation::Type("hello".to_string()),
                 InjectOperation::CursorRight(1),
