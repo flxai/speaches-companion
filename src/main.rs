@@ -1613,10 +1613,7 @@ mod tests {
         let file_config = FileConfig {
             wakeword: WakewordFileConfig {
                 realtime_partials: Some(true),
-                stop_words: vec![
-                    "full stop".to_string(),
-                    "cancel dictation".to_string(),
-                ],
+                stop_words: vec!["full stop".to_string(), "cancel dictation".to_string()],
                 ..WakewordFileConfig::default()
             },
             ..FileConfig::default()
@@ -1648,7 +1645,10 @@ mod tests {
         };
 
         assert!(!resolve_wakeword_realtime_partials(&args, &file_config));
-        assert_eq!(resolve_wakeword_stop_words(&args, &file_config), ["end note"]);
+        assert_eq!(
+            resolve_wakeword_stop_words(&args, &file_config),
+            ["end note"]
+        );
     }
 
     #[test]
