@@ -117,6 +117,13 @@ enum PartialTextCommand {
     },
 }
 
+struct LiveUpdateOptions {
+    inline_partials: bool,
+    partial_chunking: PartialChunkingConfig,
+    stop_words: StopWordMatcher,
+    stop_word_tx: Option<mpsc::Sender<()>>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct StopWordMatcher {
     phrases: Vec<Vec<String>>,
@@ -496,10 +503,12 @@ where
             self.transcript_notifier.clone(),
             self.error_notifier.clone(),
             text_session,
-            self.inline_partials,
-            self.partial_chunking,
-            self.stop_words.clone(),
-            stop_word_tx,
+            LiveUpdateOptions {
+                inline_partials: self.inline_partials,
+                partial_chunking: self.partial_chunking,
+                stop_words: self.stop_words.clone(),
+                stop_word_tx,
+            },
         ));
         self.active = Some(ActiveStreamingSession {
             session: live_session.session,
@@ -629,16 +638,19 @@ async fn consume_live_updates<I, V, N>(
     transcript_notifier: V,
     error_notifier: N,
     mut text_session: SpeculativeTextSession<I>,
-    inline_partials: bool,
-    partial_chunking: PartialChunkingConfig,
-    stop_words: StopWordMatcher,
-    stop_word_tx: Option<mpsc::Sender<()>>,
+    options: LiveUpdateOptions,
 ) -> PartialTextSession<I>
 where
     I: TextInjector,
     V: TranscriptNotifier,
     N: ErrorNotifier,
 {
+    let LiveUpdateOptions {
+        inline_partials,
+        partial_chunking,
+        stop_words,
+        stop_word_tx,
+    } = options;
     let mut display_state = PartialDisplayState::new();
     let mut updates_open = true;
     let mut commands_open = true;
