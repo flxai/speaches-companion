@@ -95,6 +95,53 @@ async fn streaming_injects_live_partial_before_hotkey_up() {
 }
 
 #[tokio::test]
+async fn streaming_stop_word_strips_partial_and_final_text() {
+    let transcriber = ManualLiveTranscriber::new("hello window full stop");
+    let updates = transcriber.updates.clone();
+    let injector = FakeInjector::default();
+    let operations = injector.operations.clone();
+    let transcript_notifier = FakeTranscriptNotifier::default();
+    let transcript_events = transcript_notifier.events.clone();
+    let mut controller = StreamingDictationController::new_with_notifiers(
+        transcriber,
+        injector,
+        transcript_notifier,
+        FakeErrorNotifier::default(),
+    )
+    .with_partial_chunking_config(no_chunking())
+    .with_stop_words(vec!["full stop".to_string()]);
+
+    controller
+        .handle_hotkey(IpcCommand::HotkeyDown)
+        .await
+        .unwrap();
+    let mut stop_word_rx = controller.take_stop_word_receiver().unwrap();
+    updates.send("hello window full stop").await;
+    assert!(stop_word_rx.recv().await.is_some());
+    wait_for_operations_len(&operations, 1).await;
+    controller
+        .handle_hotkey(IpcCommand::HotkeyUp)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            InjectOperation::Type("hello window".to_string()),
+            InjectOperation::Type(" ".to_string()),
+        ]
+    );
+    assert_eq!(
+        *transcript_events.lock().unwrap(),
+        vec![
+            TranscriptNotice::Listening,
+            TranscriptNotice::Partial("hello window".to_string()),
+            TranscriptNotice::Final("hello window".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn streaming_empty_live_update_keeps_existing_provisional_text() {
     let transcriber = ManualLiveTranscriber::new("");
     let updates = transcriber.updates.clone();

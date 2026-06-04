@@ -89,6 +89,7 @@ where
     partial_chunking: PartialChunkingConfig,
     final_transcript: bool,
     append_space: bool,
+    stop_words: StopWordMatcher,
     active: Option<ActiveStreamingSession<L::Session, I>>,
 }
 
@@ -99,6 +100,7 @@ where
     session: S,
     partial_command_tx: mpsc::Sender<PartialTextCommand>,
     partial_task: JoinHandle<PartialTextSession<I>>,
+    stop_word_rx: Option<mpsc::Receiver<()>>,
 }
 
 struct PartialTextSession<I>
@@ -113,6 +115,141 @@ enum PartialTextCommand {
     FlushPending {
         ack: oneshot::Sender<anyhow::Result<()>>,
     },
+}
+
+#[derive(Debug, Clone, Default)]
+struct StopWordMatcher {
+    phrases: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StopWordFilterResult {
+    transcript: Option<String>,
+    detected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TranscriptToken {
+    text: String,
+    start: usize,
+}
+
+impl StopWordMatcher {
+    fn new(stop_words: Vec<String>) -> Self {
+        let phrases = stop_words
+            .into_iter()
+            .filter_map(|stop_word| {
+                let tokens = tokenize_transcript(&stop_word)
+                    .into_iter()
+                    .map(|token| token.text)
+                    .collect::<Vec<_>>();
+                (!tokens.is_empty()).then_some(tokens)
+            })
+            .collect();
+        Self { phrases }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.phrases.is_empty()
+    }
+
+    fn filter_transcript(&self, transcript: &str) -> StopWordFilterResult {
+        let Some(stop_start) = self.stop_word_start(transcript) else {
+            return StopWordFilterResult {
+                transcript: Some(transcript.to_string()),
+                detected: false,
+            };
+        };
+        let kept = trim_transcript_before_stop_word(&transcript[..stop_start]);
+        StopWordFilterResult {
+            transcript: normalize_transcript_for_injection(&kept),
+            detected: true,
+        }
+    }
+
+    fn stop_word_start(&self, transcript: &str) -> Option<usize> {
+        if self.phrases.is_empty() {
+            return None;
+        }
+        let tokens = tokenize_transcript(transcript);
+        self.phrases
+            .iter()
+            .filter_map(|phrase| find_phrase_start(&tokens, phrase))
+            .min()
+    }
+}
+
+fn filter_stop_words(
+    stop_words: &StopWordMatcher,
+    stop_word_tx: &Option<mpsc::Sender<()>>,
+    transcript: &str,
+) -> Option<String> {
+    let filtered = stop_words.filter_transcript(transcript);
+    if filtered.detected {
+        signal_stop_word(stop_word_tx);
+    }
+    filtered.transcript
+}
+
+fn signal_stop_word(stop_word_tx: &Option<mpsc::Sender<()>>) {
+    let Some(stop_word_tx) = stop_word_tx else {
+        return;
+    };
+    match stop_word_tx.try_send(()) {
+        Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {}
+        Err(mpsc::error::TrySendError::Closed(())) => {}
+    }
+}
+
+fn tokenize_transcript(text: &str) -> Vec<TranscriptToken> {
+    let mut tokens = Vec::new();
+    let mut current_start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_alphanumeric() {
+            current_start.get_or_insert(index);
+            continue;
+        }
+        if let Some(start) = current_start.take() {
+            tokens.push(TranscriptToken {
+                text: text[start..index].to_lowercase(),
+                start,
+            });
+        }
+    }
+    if let Some(start) = current_start {
+        tokens.push(TranscriptToken {
+            text: text[start..].to_lowercase(),
+            start,
+        });
+    }
+    tokens
+}
+
+fn find_phrase_start(tokens: &[TranscriptToken], phrase: &[String]) -> Option<usize> {
+    if phrase.is_empty() || phrase.len() > tokens.len() {
+        return None;
+    }
+    tokens
+        .windows(phrase.len())
+        .find(|window| {
+            window
+                .iter()
+                .map(|token| token.text.as_str())
+                .eq(phrase.iter().map(String::as_str))
+        })
+        .and_then(|window| window.first().map(|token| token.start))
+}
+
+fn trim_transcript_before_stop_word(transcript: &str) -> String {
+    transcript
+        .trim_end_matches(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    ',' | '.' | '!' | '?' | ';' | ':' | '-' | '–' | '—'
+                )
+        })
+        .to_string()
 }
 
 #[derive(Debug)]
@@ -218,6 +355,7 @@ where
             partial_chunking: PartialChunkingConfig::default(),
             final_transcript: true,
             append_space: true,
+            stop_words: StopWordMatcher::default(),
             active: None,
         }
     }
@@ -246,6 +384,7 @@ where
             partial_chunking: PartialChunkingConfig::default(),
             final_transcript: true,
             append_space: true,
+            stop_words: StopWordMatcher::default(),
             active: None,
         }
     }
@@ -276,8 +415,19 @@ where
         self
     }
 
+    pub fn with_stop_words(mut self, stop_words: Vec<String>) -> Self {
+        self.stop_words = StopWordMatcher::new(stop_words);
+        self
+    }
+
     pub fn is_recording(&self) -> bool {
         self.active.is_some()
+    }
+
+    pub fn take_stop_word_receiver(&mut self) -> Option<mpsc::Receiver<()>> {
+        self.active
+            .as_mut()
+            .and_then(|active| active.stop_word_rx.take())
     }
 }
 
@@ -334,6 +484,12 @@ where
         self.notify_transcript(|notifier| notifier.notify_listening());
 
         let (partial_command_tx, partial_command_rx) = mpsc::channel(4);
+        let (stop_word_tx, stop_word_rx) = if self.stop_words.is_empty() {
+            (None, None)
+        } else {
+            let (tx, rx) = mpsc::channel(1);
+            (Some(tx), Some(rx))
+        };
         let partial_task = tokio::spawn(consume_live_updates(
             live_session.updates,
             partial_command_rx,
@@ -342,11 +498,14 @@ where
             text_session,
             self.inline_partials,
             self.partial_chunking,
+            self.stop_words.clone(),
+            stop_word_tx,
         ));
         self.active = Some(ActiveStreamingSession {
             session: live_session.session,
             partial_command_tx,
             partial_task,
+            stop_word_rx,
         });
 
         Ok(DaemonResponse::Started)
@@ -360,6 +519,7 @@ where
             session,
             partial_command_tx,
             partial_task,
+            stop_word_rx: _,
         } = active;
 
         if let Err(error) = flush_pending_partial(&partial_command_tx).await {
@@ -416,6 +576,7 @@ where
 
         let final_transcript = if self.final_transcript {
             normalize_transcript_for_injection(&stop_transcript)
+                .and_then(|transcript| self.stop_words.filter_transcript(&transcript).transcript)
         } else {
             None
         };
@@ -470,6 +631,8 @@ async fn consume_live_updates<I, V, N>(
     mut text_session: SpeculativeTextSession<I>,
     inline_partials: bool,
     partial_chunking: PartialChunkingConfig,
+    stop_words: StopWordMatcher,
+    stop_word_tx: Option<mpsc::Sender<()>>,
 ) -> PartialTextSession<I>
 where
     I: TextInjector,
@@ -496,6 +659,11 @@ where
                 let ends_at_boundary = ends_at_stable_boundary(&update.transcript);
                 let transcript = normalize_transcript_for_injection(&update.transcript);
                 let Some(transcript) = transcript else {
+                    continue;
+                };
+                let Some(transcript) =
+                    filter_stop_words(&stop_words, &stop_word_tx, &transcript)
+                else {
                     continue;
                 };
                 if !display_state.update_latest_partial(transcript.clone()) {
@@ -543,7 +711,13 @@ where
                                     if let Some(transcript) =
                                         normalize_transcript_for_injection(&update.transcript)
                                     {
-                                        display_state.update_latest_partial(transcript);
+                                        if let Some(transcript) = filter_stop_words(
+                                            &stop_words,
+                                            &stop_word_tx,
+                                            &transcript,
+                                        ) {
+                                            display_state.update_latest_partial(transcript);
+                                        }
                                     }
                                 }
                                 Err(mpsc::error::TryRecvError::Empty) => break,

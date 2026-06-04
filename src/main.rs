@@ -196,6 +196,12 @@ struct WakewordArgs {
     notify_on_detect: bool,
     #[arg(long)]
     no_notify_on_detect: bool,
+    #[arg(long, conflicts_with = "no_realtime_partials")]
+    realtime_partials: bool,
+    #[arg(long)]
+    no_realtime_partials: bool,
+    #[arg(long = "stop-word", action = ArgAction::Append)]
+    stop_words: Vec<String>,
     #[arg(long)]
     inject_delay_microsecs: Option<u32>,
 }
@@ -412,7 +418,7 @@ async fn run_wakeword_command(args: WakewordArgs) -> ExitCode {
         &file_config,
     ));
     let settings = resolve_wakeword_settings(&args, &file_config);
-    let streaming = match build_wakeword_streaming_config(&config, &file_config).await {
+    let streaming = match build_wakeword_streaming_config(&args, &config, &file_config).await {
         Ok(streaming) => streaming,
         Err(error) => {
             eprintln!("speaches-companion wakeword realtime startup failed: {error:#}");
@@ -487,10 +493,11 @@ where
 }
 
 async fn build_wakeword_streaming_config(
+    args: &WakewordArgs,
     config: &speaches_companion::config::DictateLiveConfig,
     file_config: &FileConfig,
 ) -> anyhow::Result<Option<WakewordStreamingConfig>> {
-    if !file_config.dictation.realtime_partials.unwrap_or(false) {
+    if !resolve_wakeword_realtime_partials(args, file_config) {
         return Ok(None);
     }
 
@@ -537,6 +544,7 @@ async fn build_wakeword_streaming_config(
             ),
         },
         final_transcript: final_pass,
+        stop_words: resolve_wakeword_stop_words(args, file_config),
     }))
 }
 
@@ -720,6 +728,32 @@ fn resolve_realtime_partials(args: &DaemonArgs, file_config: &FileConfig) -> boo
     } else {
         file_config.dictation.realtime_partials.unwrap_or(false)
     }
+}
+
+fn resolve_wakeword_realtime_partials(args: &WakewordArgs, file_config: &FileConfig) -> bool {
+    if args.realtime_partials {
+        true
+    } else if args.no_realtime_partials {
+        false
+    } else {
+        file_config
+            .wakeword
+            .realtime_partials
+            .or(file_config.dictation.realtime_partials)
+            .unwrap_or(false)
+    }
+}
+
+fn resolve_wakeword_stop_words(args: &WakewordArgs, file_config: &FileConfig) -> Vec<String> {
+    let stop_words = if args.stop_words.is_empty() {
+        file_config.wakeword.stop_words.clone()
+    } else {
+        args.stop_words.clone()
+    };
+    stop_words
+        .into_iter()
+        .filter_map(non_empty_string)
+        .collect()
 }
 
 fn resolve_final_pass(args: &DaemonArgs, file_config: &FileConfig) -> bool {
@@ -1549,6 +1583,7 @@ mod tests {
                 max_recording_ms: Some(20_000),
                 press_enter: Some(false),
                 notify_on_detect: Some(true),
+                ..WakewordFileConfig::default()
             },
             ..FileConfig::default()
         };
@@ -1570,6 +1605,50 @@ mod tests {
         assert_eq!(settings.max_recording, Duration::from_millis(20_000));
         assert!(!settings.press_enter);
         assert!(resolve_wakeword_notify_on_detect(&args, &file_config));
+    }
+
+    #[test]
+    fn wakeword_reads_streaming_controls_from_file_config() {
+        let args = parse_wakeword_args(["speaches-companion", "wakeword"]);
+        let file_config = FileConfig {
+            wakeword: WakewordFileConfig {
+                realtime_partials: Some(true),
+                stop_words: vec![
+                    "full stop".to_string(),
+                    "cancel dictation".to_string(),
+                ],
+                ..WakewordFileConfig::default()
+            },
+            ..FileConfig::default()
+        };
+
+        assert!(resolve_wakeword_realtime_partials(&args, &file_config));
+        assert_eq!(
+            resolve_wakeword_stop_words(&args, &file_config),
+            ["full stop", "cancel dictation"]
+        );
+    }
+
+    #[test]
+    fn wakeword_cli_overrides_streaming_controls_from_file_config() {
+        let args = parse_wakeword_args([
+            "speaches-companion",
+            "wakeword",
+            "--no-realtime-partials",
+            "--stop-word",
+            "end note",
+        ]);
+        let file_config = FileConfig {
+            wakeword: WakewordFileConfig {
+                realtime_partials: Some(true),
+                stop_words: vec!["full stop".to_string()],
+                ..WakewordFileConfig::default()
+            },
+            ..FileConfig::default()
+        };
+
+        assert!(!resolve_wakeword_realtime_partials(&args, &file_config));
+        assert_eq!(resolve_wakeword_stop_words(&args, &file_config), ["end note"]);
     }
 
     #[test]

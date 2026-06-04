@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tokio::time::{sleep, Instant};
 use tract_onnx::prelude::*;
 
@@ -134,6 +135,7 @@ pub struct WakewordStreamingConfig {
     pub inline_partials: bool,
     pub partial_chunking: PartialChunkingConfig,
     pub final_transcript: bool,
+    pub stop_words: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -949,6 +951,7 @@ where
         .with_inline_partials(streaming.inline_partials)
         .with_partial_chunking_config(streaming.partial_chunking)
         .with_final_transcript(streaming.final_transcript)
+        .with_stop_words(streaming.stop_words)
         .with_append_space(config.append_space);
 
     activity.set_recording();
@@ -956,7 +959,9 @@ where
         activity.clear();
         return Err(error);
     }
-    let saw_speech = wait_for_recording_silence(shared_pcm, &config.settings).await;
+    let stop_word_rx = controller.take_stop_word_receiver();
+    let saw_speech =
+        wait_for_recording_silence_or_stop_word(shared_pcm, &config.settings, stop_word_rx).await;
     activity.set_waiting();
     let stop_result = controller.handle_hotkey(IpcCommand::HotkeyUp).await;
 
@@ -1110,6 +1115,28 @@ pub async fn record_until_silence(
         Ok(pcm)
     } else {
         Ok(Vec::new())
+    }
+}
+
+async fn wait_for_recording_silence_or_stop_word(
+    shared_pcm: &SharedPcmBuffer,
+    settings: &WakewordSettings,
+    stop_word_rx: Option<mpsc::Receiver<()>>,
+) -> anyhow::Result<bool> {
+    let Some(mut stop_word_rx) = stop_word_rx else {
+        return wait_for_recording_silence(shared_pcm, settings).await;
+    };
+
+    tokio::select! {
+        result = wait_for_recording_silence(shared_pcm, settings) => result,
+        stop_word = stop_word_rx.recv() => {
+            if stop_word.is_some() {
+                eprintln!("speaches-companion wakeword stop word detected");
+                Ok(true)
+            } else {
+                wait_for_recording_silence(shared_pcm, settings).await
+            }
+        }
     }
 }
 

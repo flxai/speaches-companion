@@ -91,6 +91,9 @@ pub struct WakewordFileConfig {
     pub max_recording_ms: Option<u64>,
     pub press_enter: Option<bool>,
     pub notify_on_detect: Option<bool>,
+    pub realtime_partials: Option<bool>,
+    #[serde(default)]
+    pub stop_words: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
